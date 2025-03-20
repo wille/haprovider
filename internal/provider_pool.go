@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-var ErrNoProvidersAvailable = errors.New("No providers available")
+var ErrNoProvidersAvailable = errors.New("no providers available")
 
 type Endpoint struct {
 	ProviderName string
@@ -67,7 +67,7 @@ func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
 
 	e.retryAt = time.Now().Add(retryAfter)
 
-	return fmt.Errorf("Rate limited for %f seconds", retryAfter.Seconds())
+	return fmt.Errorf("rate limited for %f seconds", retryAfter.Seconds())
 }
 
 func (e *Endpoint) RateLimit() {
@@ -82,7 +82,7 @@ func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
 	}
 
 	if _, ok := clientVersion.Result.(string); !ok {
-		err = fmt.Errorf("could not get a proper web3_clientVersion")
+		err = fmt.Errorf("could not get a proper web3_clientVersion: %v", clientVersion.Error)
 		e.SetStatus(false, err)
 		return err
 	}
@@ -109,6 +109,10 @@ type Provider struct {
 	ChainID  int         `yaml:"chainId"`
 	Kind     string      `yaml:"kind"`
 	Endpoint []*Endpoint `yaml:"endpoints"`
+
+	requestCount       int
+	failedRequestCount int
+	openConnections    int
 }
 
 // GetActiveEndpoints returns a list of endpoints that are currently considered online

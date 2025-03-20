@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,24 +10,37 @@ import (
 	"net/url"
 
 	"log"
+
+	servertiming "github.com/mitchellh/go-server-timing"
 )
 
 var client = &http.Client{}
 
-func ProxyHTTP(provider *Provider, body []byte) ([]byte, error) {
+func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *servertiming.Header) ([]byte, *Endpoint, error) {
 	endpoints := provider.GetActiveEndpoints()
 
 	for _, endpoint := range endpoints {
+		m := timing.NewMetric(endpoint.GetName()).Start()
 		pbody, err := SendHTTPRequest(endpoint, body)
+		m.Stop()
+
 		if err != nil {
 			endpoint.SetStatus(false, err)
+			provider.failedRequestCount++
 			continue
 		}
 
-		return pbody, nil
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		default:
+			endpoint.SetStatus(true, nil)
+			provider.requestCount++
+			return pbody, endpoint, nil
+		}
 	}
 
-	return nil, ErrNoProvidersAvailable
+	return nil, nil, ErrNoProvidersAvailable
 }
 
 func SendHTTPRequest(endpoint *Endpoint, body []byte) ([]byte, error) {
@@ -51,6 +65,10 @@ func SendHTTPRequest(endpoint *Endpoint, body []byte) ([]byte, error) {
 
 	b, err := io.ReadAll(resp.Body)
 
+	if err != nil {
+		return nil, err
+	}
+
 	switch resp.StatusCode {
 	case http.StatusOK:
 		break
@@ -58,10 +76,6 @@ func SendHTTPRequest(endpoint *Endpoint, body []byte) ([]byte, error) {
 		return nil, endpoint.HandleTooManyRequests(resp)
 	default:
 		return nil, fmt.Errorf("unexpected status code %d, %s", resp.StatusCode, FormatRawBody(string(b)))
-	}
-
-	if err != nil {
-		return nil, err
 	}
 
 	return b, nil
@@ -84,7 +98,7 @@ func SendHTTPRPCRequest(endpoint *Endpoint, requestID string, rpcreq *RPCRequest
 	return response, nil
 }
 
-func IncomingHttpHandler(provider *Provider, w http.ResponseWriter, r *http.Request) {
+func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Println("Error reading body", err)
@@ -94,12 +108,17 @@ func IncomingHttpHandler(provider *Provider, w http.ResponseWriter, r *http.Requ
 
 	// TODO validate JSON body
 
-	pbody, err := ProxyHTTP(provider, body)
+	pbody, endpoint, err := ProxyHTTP(ctx, provider, body, timing)
+
 	if err != nil {
-		log.Println("Could not forward request to any provider", err)
+		// TODO this log
+		log.Println("Could not forward request to any provider", provider.ChainID, err)
 		http.Error(w, fmt.Sprintf("Could not forward request to any provider %s", err), http.StatusServiceUnavailable)
 		return
 	}
+
+	w.Header().Set("X-Provider", endpoint.GetName())
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	_, err = w.Write(pbody)
 	if err != nil {

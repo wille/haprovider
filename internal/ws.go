@@ -10,32 +10,58 @@ import (
 	"strings"
 	"time"
 
+	servertiming "github.com/mitchellh/go-server-timing"
+
 	"github.com/gorilla/websocket"
 )
 
-type ProviderConnection struct {
-	Conn      *websocket.Conn
-	Endpoint  *Endpoint
-	Provider  *Provider
+var upgrader = websocket.Upgrader{} // use default options
+
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+)
+
+type ProviderWSConnection struct {
+	ctx context.Context
+
+	// Conn is the underlying websocket connection to the provider
+	*websocket.Conn
+
+	// Endpoint is the endpoint we're connected to
+	*Endpoint
+
+	// Provider is the provider we're connected to
+	*Provider
+
+	// listeners is a map of request IDs to channels for the responses
 	listeners map[string]chan *RPCResponse
 }
 
-func (r *ProviderConnection) Write(req *RPCRequest) error {
+func (r *ProviderWSConnection) Write(req *RPCRequest) error {
 	b := SerializeRPCRequest(req)
+
+	// TODO adjustable timeout
+	r.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 
 	err := r.Conn.WriteMessage(websocket.TextMessage, b)
 	return err
 }
 
-func (r *ProviderConnection) AwaitReply(requestID string, req *RPCRequest) (*RPCResponse, error) {
+func (r *ProviderWSConnection) AwaitReply(ctx context.Context, requestID string, req *RPCRequest) (*RPCResponse, error) {
 	req.ID = requestID
+
 	ch := make(chan *RPCResponse, 1)
-	r.listeners[requestID] = ch
-	defer delete(r.listeners, requestID)
 	defer close(ch)
 
-	timeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	r.listeners[requestID] = ch
+	defer delete(r.listeners, requestID)
 
 	if err := r.Write(req); err != nil {
 		return nil, err
@@ -44,15 +70,15 @@ func (r *ProviderConnection) AwaitReply(requestID string, req *RPCRequest) (*RPC
 	select {
 	case reply := <-ch:
 		return reply, nil
-	case <-timeout.Done():
-		return nil, timeout.Err()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
-func (r *ProviderConnection) healthcheck() error {
+func (r *ProviderWSConnection) healthcheck() error {
 	// Skip chainID validation if not set in config
 	if r.Provider.ChainID != 0 {
-		res, err := r.AwaitReply("ha_chainId", NewRPCRequest("eth_chainId", nil))
+		res, err := r.AwaitReply(r.ctx, "ha_chainId", NewRPCRequest("eth_chainId", nil))
 		if err != nil {
 			return err
 		}
@@ -70,72 +96,61 @@ func (r *ProviderConnection) healthcheck() error {
 	return nil
 }
 
-type Proxy struct {
+type WebSocketProxy struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	provider *Provider
+	endpoint *Endpoint
+
 	ID string
 
 	ClientConn *websocket.Conn
-	ClientChan chan *RPCResponse
+	Responses  chan *RPCResponse
 
-	Provider     *ProviderConnection
-	ProviderChan chan *RPCRequest
+	ProviderConn *ProviderWSConnection
+	Requests     chan *RPCRequest
 
-	Listeners map[string]chan *RPCResponse
-
-	ErrorChan chan error
-	closed    bool
+	closed bool
 }
 
 // Close gracefully closes the proxy connection
-func (p *Proxy) Close() {
+func (p *WebSocketProxy) Close(reason error) {
 	if p.closed {
 		return
 	}
 	p.closed = true
 
-	log.Printf("Closing proxy %s\n", p.ID)
+	log.Printf("Connection %s: %s\n", p.ID, reason)
 
-	if p.Provider != nil {
-		p.ClientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	if p.ProviderConn != nil {
+		// p.ClientConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		p.ClientConn.Close()
 	}
 
-	if p.Provider != nil {
-		p.Provider.Conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		p.Provider.Conn.Close()
+	if p.ProviderConn != nil {
+		// p.Provider.Conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		p.ProviderConn.Conn.Close()
 	}
 
-	close(p.ClientChan)
-	close(p.ProviderChan)
-	close(p.ErrorChan)
+	p.provider.openConnections--
+	p.cancel()
+
+	close(p.Responses)
+	close(p.Requests)
 }
 
-func ProxyWebSocket(provider *Provider, proxy *Proxy) (*ProviderConnection, error) {
-	for _, endpoint := range provider.GetActiveEndpoints() {
-		if endpoint.Ws == "" {
-			continue
-		}
-
-		conn, err := DialProvider2(provider, endpoint, proxy)
-		if err != nil {
-			endpoint.SetStatus(false, err)
-			continue
-		}
-
-		endpoint.SetStatus(true, nil)
-
-		return conn, nil
-	}
-
-	return nil, ErrNoProvidersAvailable
-}
-
-func DialProvider2(provider *Provider, endpoint *Endpoint, proxy *Proxy) (*ProviderConnection, error) {
+func DialWebSocketProvider(ctx context.Context, provider *Provider, endpoint *Endpoint, proxy *WebSocketProxy) (*ProviderWSConnection, error) {
 	u, _ := url.Parse(endpoint.Ws)
 
 	headers := http.Header{}
 	headers.Set("User-Agent", "haprovider/"+Version)
 
-	ws, resp, err := websocket.DefaultDialer.Dial(u.String(), headers)
+	// TODO adjustable timeout
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	ws, resp, err := websocket.DefaultDialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +166,8 @@ func DialProvider2(provider *Provider, endpoint *Endpoint, proxy *Proxy) (*Provi
 		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
 
-	conn := &ProviderConnection{
+	conn := &ProviderWSConnection{
+		ctx:       ctx,
 		Conn:      ws,
 		Endpoint:  endpoint,
 		Provider:  provider,
@@ -160,7 +176,7 @@ func DialProvider2(provider *Provider, endpoint *Endpoint, proxy *Proxy) (*Provi
 
 	go conn.OpenProviderConnection(proxy)
 
-	clientVersion, err := conn.AwaitReply("ha_clientVersion", NewRPCRequest("web3_clientVersion", nil))
+	clientVersion, err := conn.AwaitReply(ctx, "ha_clientVersion", NewRPCRequest("web3_clientVersion", nil))
 	if err != nil {
 		ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		ws.Close()
@@ -179,40 +195,50 @@ func DialProvider2(provider *Provider, endpoint *Endpoint, proxy *Proxy) (*Provi
 	return conn, nil
 }
 
-func (conn *ProviderConnection) OpenProviderConnection(proxy *Proxy) {
+func (conn *ProviderWSConnection) OpenProviderConnection(proxy *WebSocketProxy) {
 	ws := conn.Conn
 
 	// interrupt := make(chan os.Signal, 1)
 	// signal.Notify(interrupt, os.Interrupt)
 
-	errorChan := make(chan error, 1)
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 
+	// From client to provider
 	go func() {
 		for {
 			select {
-			case err := <-errorChan:
-				// Provider websocket connection died.
-				// TODO Close client connection
-				log.Println("provider err", err)
-
-				_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-				proxy.Close()
-
+			case <-proxy.ctx.Done():
 				return
-			case rpcResponse := <-proxy.ProviderChan:
-				err := conn.Write(rpcResponse)
+			case req := <-proxy.Requests:
+				err := conn.Write(req)
 				if err != nil {
-					errorChan <- fmt.Errorf("write: %s", err)
+					proxy.Close(fmt.Errorf("write to provider: %s", err))
+					return
+				}
+			case <-ticker.C:
+				ws.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+					proxy.Close(fmt.Errorf("write to provider: %s", err))
+					return
 				}
 			}
 
 		}
 	}()
 
+	ws.SetReadDeadline(time.Now().Add(pongWait))
+	ws.SetPongHandler(func(string) error {
+		ws.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	// From provider to client
 	for {
+		// TODO adjustable timeout
 		mt, message, err := ws.ReadMessage()
 		if err != nil {
-			errorChan <- fmt.Errorf("read: %s", err)
+			proxy.Close(fmt.Errorf("read from provider: %s", err))
 			break
 		}
 
@@ -229,12 +255,15 @@ func (conn *ProviderConnection) OpenProviderConnection(proxy *Proxy) {
 		var rpcCall RPCResponse
 		err = json.Unmarshal(message, &rpcCall)
 		if err != nil {
-			errorChan <- fmt.Errorf("decode: %s, msg: %s", err, message)
+			proxy.provider.failedRequestCount++
+			proxy.Close(fmt.Errorf("decode: %s, msg: %s", err, message))
 			return
 		}
 
 		if rpcCall.Error != nil {
-			errorChan <- fmt.Errorf("RPC error %s", rpcCall.Error)
+			// TODO don't fail on RPC error unless fatal  like a rate limit
+			proxy.Close(fmt.Errorf("RPC error %s", rpcCall.Error))
+			proxy.provider.failedRequestCount++
 			return
 		}
 
@@ -247,7 +276,125 @@ func (conn *ProviderConnection) OpenProviderConnection(proxy *Proxy) {
 		}
 
 		// TODO log subscription messages
+		proxy.provider.requestCount++
 
-		proxy.ClientChan <- &rpcCall
+		proxy.Responses <- &rpcCall
+	}
+}
+
+func NewWebSocketProxy(ctx context.Context, provider *Provider, clientConn *websocket.Conn) (*WebSocketProxy, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
+	proxy := &WebSocketProxy{
+		ctx:        ctx,
+		cancel:     cancel,
+		provider:   provider,
+		ID:         clientConn.RemoteAddr().String(),
+		ClientConn: clientConn,
+		Responses:  make(chan *RPCResponse, 32),
+		Requests:   make(chan *RPCRequest, 32),
+	}
+
+	for _, endpoint := range provider.GetActiveEndpoints() {
+		if endpoint.Ws == "" {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		conn, err := DialWebSocketProvider(ctx, provider, endpoint, proxy)
+		if err != nil {
+			endpoint.SetStatus(false, err)
+			continue
+		}
+
+		provider.openConnections++
+		proxy.endpoint = endpoint
+		proxy.ProviderConn = conn
+
+		endpoint.SetStatus(true, nil)
+
+		return proxy, nil
+	}
+
+	return nil, ErrNoProvidersAvailable
+}
+
+func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("Error upgrading connection", err)
+		return
+	}
+
+	proxy, err := NewWebSocketProxy(ctx, provider, ws)
+
+	if err != nil {
+		http.Error(w, "failed to connect: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
+	// From provider to client
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case rpcResponse := <-proxy.Responses:
+				ss := SerializeRPCResponse(rpcResponse)
+
+				proxy.ClientConn.SetWriteDeadline(time.Now().Add(writeWait))
+				err := proxy.ClientConn.WriteMessage(websocket.TextMessage, ss)
+				if err != nil {
+					proxy.Close(fmt.Errorf("write to client: %s", err))
+					return
+				}
+			case <-ticker.C:
+				proxy.ClientConn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := proxy.ClientConn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					proxy.Close(fmt.Errorf("write to client: %s", err))
+					return
+				}
+			}
+		}
+	}()
+
+	proxy.ClientConn.SetReadDeadline(time.Now().Add(pongWait))
+	proxy.ClientConn.SetPongHandler(func(string) error {
+		proxy.ClientConn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	// From client to provider
+	for {
+		mt, message, err := proxy.ClientConn.ReadMessage()
+		if err != nil {
+			proxy.Close(fmt.Errorf("read from client: %s", err))
+			break
+		}
+
+		if mt != websocket.TextMessage {
+			log.Printf("Ignoring unknown message type %d\n", mt)
+			continue
+		}
+
+		var req RPCRequest
+		err = json.Unmarshal(message, &req)
+		if err != nil {
+			proxy.Close(fmt.Errorf("failed to decode request: %s, msg: %s", err, FormatRawBody(string(message))))
+			continue
+		}
+
+		log.Printf("%s %s [%f] %s\n", proxy.ClientConn.RemoteAddr().String(), proxy.ProviderConn.Endpoint.GetName(), req.ID, req.Method)
+
+		proxy.Requests <- &req
 	}
 }

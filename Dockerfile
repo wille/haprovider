@@ -5,7 +5,7 @@ LABEL org.opencontainers.image.source=https://github.com/wille/haprovider
 ARG TARGETOS
 ARG TARGETARCH
 
-WORKDIR /workspace
+WORKDIR /haprovider
 
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -13,11 +13,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/haprovider/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o haprovider cmd/haprovider/main.go
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/manager .
-USER 65532:65532
+COPY --from=builder /haprovider/haprovider .
 
-ENTRYPOINT ["/manager"]
+ENTRYPOINT ["/haprovider"]

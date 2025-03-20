@@ -20,14 +20,19 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-	z, err := os.ReadFile("config.yml")
-	if err != nil {
-		panic(err)
+	configFromEnv := os.Getenv("HAPROVIDER_CONFIG")
+	if configFromEnv == "" {
+		z, err := os.ReadFile("config.yml")
+		if err != nil {
+			panic(err)
+		}
+
+		configFromEnv = string(z)
 	}
 
 	config := &Config{}
 
-	err = yaml.Unmarshal(z, config)
+	err := yaml.Unmarshal([]byte(configFromEnv), config)
 	if err != nil {
 		panic(err)
 	}
