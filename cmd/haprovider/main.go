@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
@@ -65,6 +69,8 @@ func main() {
 		default:
 			log.Fatalf("Unknown provider kind %s", provider.Kind)
 		}
+
+		provider.Name = name
 
 		for i, endpoint := range provider.Endpoint {
 			endpoint.ProviderName = name
@@ -139,5 +145,28 @@ func main() {
 
 	log.Printf("%d/%d providers available\n", online, total)
 
-	log.Fatal(http.ListenAndServe(*addr, nil))
+	server := http.Server{
+		Addr:    *addr,
+		Handler: http.DefaultServeMux,
+	}
+
+	go server.ListenAndServe()
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+
+	<-interrupt
+
+	log.Printf("shutting down...")
+
+	for _, conn := range ActiveConnections {
+		conn.Close(fmt.Errorf("shutting down"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	server.Shutdown(ctx)
+
+	log.Printf("shutdown complete")
 }

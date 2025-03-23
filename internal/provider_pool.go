@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -10,13 +11,28 @@ import (
 	"time"
 )
 
-var ErrNoProvidersAvailable = errors.New("no providers available")
+var (
+	ErrNoProvidersAvailable    = errors.New("no providers available")
+	ErrNoProvidersForWebsocket = errors.New("no providers available for websocket connections")
+	ErrNoProvidersForHTTP      = errors.New("no providers available for http connections")
+)
 
 type Endpoint struct {
 	ProviderName string
 	Name         string `yaml:"name"`
 	Http         string `yaml:"http"`
 	Ws           string `yaml:"ws"`
+
+	// The timeout for the provider. Use Endpoint.GetTimeout() to get the actual timeout
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+
+	// Public indicates that the endpoint is public and that we
+	// will skip debug headers and detailed error messages to the client.
+	// TODO
+	Public bool `yaml:"public,omitempty"`
+
+	// Xfwd makes us add X-Forwarded-* headers to the upstream request
+	Xfwd bool `yaml:"xfwd,omitempty"`
 
 	retryAt       time.Time
 	attempt       int
@@ -28,7 +44,13 @@ type Endpoint struct {
 
 func (e *Endpoint) GetName() string {
 	return fmt.Sprintf("%s/%s", e.ProviderName, e.Name)
+}
 
+func (e *Endpoint) GetTimeout() time.Duration {
+	if e.Timeout > 0 {
+		return e.Timeout
+	}
+	return 10 * time.Second
 }
 
 func (e *Endpoint) SetStatus(online bool, err error) {
@@ -37,7 +59,8 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 
 	if e.online == online {
 		if !online {
-			log.Printf("Endpoint %s still offline (%s)\n", e.GetName(), err)
+			diff := time.Until(e.retryAt)
+			log.Printf("Endpoint %s still offline (%s). Delaying retry for %s\n", e.GetName(), err, diff.String())
 			e.attempt++
 		}
 		return
@@ -45,8 +68,9 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 
 	e.online = online
 	if !online {
-		log.Printf("Endpoint %s/%s offline (%s)\n", e.ProviderName, e.Name, err)
 		e.retryAt = time.Now().Add(30 * time.Second)
+		diff := time.Until(e.retryAt)
+		log.Printf("Endpoint %s/%s offline (%s). Delaying retry for %s\n", e.ProviderName, e.Name, err, diff.String())
 	} else {
 		log.Printf("Endpoint %s/%s online [%s]\n", e.ProviderName, e.Name, e.clientVersion)
 		e.retryAt = time.Time{}
@@ -75,21 +99,26 @@ func (e *Endpoint) RateLimit() {
 }
 
 func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
-	clientVersion, err := SendHTTPRPCRequest(e, "ha_clientVersion", NewRPCRequest("web3_clientVersion", []string{}))
+	if !e.retryAt.IsZero() && time.Since(e.retryAt) < 0 {
+		return fmt.Errorf("rate limited for %f seconds", time.Since(e.retryAt).Seconds())
+	}
+
+	clientVersion, err := SendHTTPRPCRequest(context.Background(), e, "ha_clientVersion", NewRPCRequest("web3_clientVersion", []string{}))
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
 	}
 
-	if _, ok := clientVersion.Result.(string); !ok {
-		err = fmt.Errorf("could not get a proper web3_clientVersion: %v", clientVersion.Error)
-		e.SetStatus(false, err)
-		return err
+	if _, ok := clientVersion.Result.(string); ok {
+		// err = fmt.Errorf("could not get a proper web3_clientVersion: %v", clientVersion.Error)
+		// e.SetStatus(false, err)
+		// return err
+		e.clientVersion = clientVersion.Result.(string)
+	} else {
+		e.clientVersion = "unknown"
 	}
 
-	e.clientVersion = clientVersion.Result.(string)
-
-	chainId, err := SendHTTPRPCRequest(e, "ha_chainId", NewRPCRequest("eth_chainId", []string{}))
+	chainId, err := SendHTTPRPCRequest(context.Background(), e, "ha_chainId", NewRPCRequest("eth_chainId", []string{}))
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
@@ -98,6 +127,7 @@ func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
 	if chainId.Result.(string) != fmt.Sprintf("0x%x", p.ChainID) {
 		err = fmt.Errorf("chainId mismatch: received=%s, expected=%d", chainId.Result, p.ChainID)
 		e.SetStatus(false, err)
+		return err
 	}
 
 	e.SetStatus(true, nil)
@@ -106,6 +136,7 @@ func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
 }
 
 type Provider struct {
+	Name     string
 	ChainID  int         `yaml:"chainId"`
 	Kind     string      `yaml:"kind"`
 	Endpoint []*Endpoint `yaml:"endpoints"`
@@ -120,10 +151,6 @@ func (p *Provider) GetActiveEndpoints() []*Endpoint {
 	var active []*Endpoint
 
 	for _, e := range p.Endpoint {
-		if !e.retryAt.IsZero() && time.Since(e.retryAt) < 0 {
-			log.Printf("Endpoint %s rate limited for %f seconds more...", e.Name, time.Since(e.retryAt).Seconds())
-			continue
-		}
 
 		// backoff
 

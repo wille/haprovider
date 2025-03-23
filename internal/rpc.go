@@ -70,19 +70,6 @@ func GetClientID(zz interface{}) (string, string) {
 	return k[0], ""
 }
 
-func SetClientID(prefix string, zz interface{}) string {
-	var id string
-
-	switch zz.(type) {
-	case string:
-		id = zz.(string)
-	case float64:
-		id = strconv.Itoa(int(zz.(float64)))
-	}
-
-	return strings.Join([]string{prefix, id}, ":")
-}
-
 func ValidateRequestBody() {
 
 }

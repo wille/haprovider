@@ -21,8 +21,16 @@ func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *ser
 
 	for _, endpoint := range endpoints {
 		m := timing.NewMetric(endpoint.GetName()).Start()
-		pbody, err := SendHTTPRequest(endpoint, body)
+		pbody, err := SendHTTPRequest(ctx, endpoint, body)
 		m.Stop()
+
+		// In case the request was closed before the provider connection was established
+		// return to not treat the error as a provider error
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		default:
+		}
 
 		if err != nil {
 			endpoint.SetStatus(false, err)
@@ -30,32 +38,31 @@ func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *ser
 			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		default:
-			endpoint.SetStatus(true, nil)
-			provider.requestCount++
-			return pbody, endpoint, nil
-		}
+		endpoint.SetStatus(true, nil)
+		provider.requestCount++
+		return pbody, endpoint, nil
 	}
 
 	return nil, nil, ErrNoProvidersAvailable
 }
 
-func SendHTTPRequest(endpoint *Endpoint, body []byte) ([]byte, error) {
+func SendHTTPRequest(ctx context.Context, endpoint *Endpoint, body []byte) ([]byte, error) {
 	url, _ := url.Parse(endpoint.Http)
 
-	req := &http.Request{
-		Method: "POST",
-		URL:    url,
+	ctx, cancel := context.WithTimeout(ctx, endpoint.GetTimeout())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
+
 	req.Header = make(http.Header)
 	req.Header.Set("User-Agent", "haprovider/"+Version)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	req.ContentLength = int64(len(body))
-	req.Body = io.NopCloser(bytes.NewReader(body))
+	// req.ContentLength = int64(len(body))
+	// req.Body = io.NopCloser(bytes.NewReader(body))
 
 	resp, err := client.Do(req)
 
@@ -81,10 +88,10 @@ func SendHTTPRequest(endpoint *Endpoint, body []byte) ([]byte, error) {
 	return b, nil
 }
 
-func SendHTTPRPCRequest(endpoint *Endpoint, requestID string, rpcreq *RPCRequest) (*RPCResponse, error) {
+func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, requestID string, rpcreq *RPCRequest) (*RPCResponse, error) {
 	req := SerializeRPCRequest(rpcreq)
 
-	b, err := SendHTTPRequest(endpoint, req)
+	b, err := SendHTTPRequest(ctx, endpoint, req)
 	if err != nil {
 		return nil, err
 	}
@@ -110,10 +117,15 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 
 	pbody, endpoint, err := ProxyHTTP(ctx, provider, body, timing)
 
+	if err == ErrNoProvidersAvailable {
+		log.Printf("no providers available")
+		http.Error(w, "no providers available", http.StatusServiceUnavailable)
+		return
+	}
+
 	if err != nil {
-		// TODO this log
-		log.Println("Could not forward request to any provider", provider.ChainID, err)
-		http.Error(w, fmt.Sprintf("Could not forward request to any provider %s", err), http.StatusServiceUnavailable)
+		log.Printf("error dialing provider: %s", err)
+		http.Error(w, "error dialing provider: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
