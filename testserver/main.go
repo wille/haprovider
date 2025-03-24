@@ -37,6 +37,9 @@ func handleRequest(body []byte) (*internal.RPCResponse, error) {
 	case "eth_chainId":
 		resp.Result = "0x1"
 		return resp, nil
+	// case "eth_blockNumber":
+	// 	resp.Result = "0x1"
+	// 	return resp, nil
 	case "ha_ratelimit":
 		resp.Error = map[string]any{
 			"code":    -32005,
@@ -76,8 +79,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	ctx, cancel := context.WithCancelCause(r.Context())
-	client := internal.NewClient(ctx, cancel, ws)
+	ctx, _ := context.WithCancelCause(r.Context())
+	client := internal.NewClient(ws)
 
 	fmt.Println("Client connected")
 

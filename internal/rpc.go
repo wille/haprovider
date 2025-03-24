@@ -2,15 +2,16 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 )
 
 type RPCRequest struct {
-	Version string      `json:"jsonrpc"`
-	ID      interface{} `json:"id,omitempty"`
-	Method  string      `json:"method,omitempty"`
-	Params  interface{} `json:"params,omitempty"`
+	Version string `json:"jsonrpc"`
+	ID      any    `json:"id,omitempty"`
+	Method  string `json:"method,omitempty"`
+	Params  any    `json:"params,omitempty"`
 }
 
 func SerializeRPCRequest(req *RPCRequest) []byte {
@@ -23,10 +24,30 @@ func SerializeRPCResponse(req *RPCResponse) []byte {
 	return b
 }
 
-func NewRPCRequest(method string, params interface{}) *RPCRequest {
+func DecodeRPCRequest(b []byte) (*RPCRequest, error) {
+	var req RPCRequest
+	err := json.Unmarshal(b, &req)
+	if err != nil {
+		return nil, err
+	}
+
+	return &req, nil
+}
+
+func DecodeRPCResponse(b []byte) (*RPCResponse, error) {
+	var res RPCResponse
+	err := json.Unmarshal(b, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return &res, nil
+}
+
+func NewRPCRequest(id string, method string, params any) *RPCRequest {
 	return &RPCRequest{
 		Version: "2.0",
-		ID:      "1", // tood
+		ID:      id,
 		Method:  method,
 		Params:  params,
 	}
@@ -36,11 +57,26 @@ type RPCResponse struct {
 	Version string `json:"jsonrpc"`
 
 	// ID might be a string or number
-	ID     interface{} `json:"id,omitempty"`
-	Result interface{} `json:"result"`
-	Method string      `json:"method,omitempty"`
-	Params interface{} `json:"params,omitempty"`
-	Error  interface{} `json:"error,omitempty"`
+	ID     any    `json:"id,omitempty"`
+	Result any    `json:"result"`
+	Method string `json:"method,omitempty"`
+	Params any    `json:"params,omitempty"`
+	Error  any    `json:"error,omitempty"`
+}
+
+func (r *RPCResponse) IsError() bool {
+	return r.Error != nil
+}
+
+func (r *RPCResponse) GetError() (int, error) {
+	err, ok := r.Error.(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("unable to parse error: %v", r.Error)
+	}
+
+	errorCode := err["code"].(float64)
+
+	return int(errorCode), fmt.Errorf("%d %s", int(errorCode), err["message"])
 }
 
 func HexToInt(s string) (int, error) {
@@ -49,33 +85,17 @@ func HexToInt(s string) (int, error) {
 	return int(i), err
 }
 
-func GetClientID(zz interface{}) (string, string) {
-	var id string
-
-	switch zz.(type) {
+// GetRequestIDString returns the request ID as a string.
+// The request ID is commonly a number, but might be a string with a number or a string.
+func GetRequestIDString(id any) string {
+	switch v := id.(type) {
 	case string:
-		id = zz.(string)
+		return v
 	case float64:
-		id = strconv.Itoa(int(zz.(float64)))
+		return strconv.Itoa(int(v))
 	}
 
-	if zz == nil {
-		return "", ""
-	}
-
-	k := strings.Split(id, ":")
-	if len(k) > 1 {
-		return k[0], k[1]
-	}
-	return k[0], ""
-}
-
-func ValidateRequestBody() {
-
-}
-
-func ValidateResponseBody() {
-
+	return ""
 }
 
 // FormatRawBody formats a response body so we can include it in log output in a human readable format

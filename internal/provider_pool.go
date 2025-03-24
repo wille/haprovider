@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -25,14 +25,6 @@ type Endpoint struct {
 
 	// The timeout for the provider. Use Endpoint.GetTimeout() to get the actual timeout
 	Timeout time.Duration `yaml:"timeout,omitempty"`
-
-	// Public indicates that the endpoint is public and that we
-	// will skip debug headers and detailed error messages to the client.
-	// TODO
-	Public bool `yaml:"public,omitempty"`
-
-	// Xfwd makes us add X-Forwarded-* headers to the upstream request
-	Xfwd bool `yaml:"xfwd,omitempty"`
 
 	retryAt       time.Time
 	attempt       int
@@ -57,11 +49,17 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 	e.m.Lock()
 	defer e.m.Unlock()
 
+	log := slog.With("endpoint", e.GetName())
+
 	if e.online == online {
 		if !online {
-			diff := time.Until(e.retryAt)
-			log.Printf("Endpoint %s still offline (%s). Delaying retry for %s\n", e.GetName(), err, diff.String())
 			e.attempt++
+
+			// Simple backoff
+			e.retryAt = time.Now().Add(time.Duration(e.attempt) * time.Second)
+
+			diff := time.Until(e.retryAt)
+			log.Info("endpoint still offline", "error", err, "retry_in", diff)
 		}
 		return
 	}
@@ -70,28 +68,39 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 	if !online {
 		e.retryAt = time.Now().Add(30 * time.Second)
 		diff := time.Until(e.retryAt)
-		log.Printf("Endpoint %s/%s offline (%s). Delaying retry for %s\n", e.ProviderName, e.Name, err, diff.String())
+		log.Info("endpoint offline", "error", err, "retry_in", diff)
 	} else {
-		log.Printf("Endpoint %s/%s online [%s]\n", e.ProviderName, e.Name, e.clientVersion)
+		log.Info("endpoint online", "client_version", e.clientVersion)
 		e.retryAt = time.Time{}
 		e.attempt = 0
 	}
 }
 
-// HandleTooManyRequests handles a 429 response and stops using the provider until it's ready again
+// HandleTooManyRequests handles a 429 response and stops using the provider until it's ready again.
 func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
-	header := req.Header.Get("Retry-After")
-
 	var retryAfter time.Duration
-	if sec, err := strconv.Atoi(header); err != nil && sec > 0 {
-		retryAfter = time.Duration(sec) * time.Second
+
+	if req != nil {
+		header := req.Header.Get("Retry-After")
+
+		if sec, err := strconv.Atoi(header); err != nil && sec > 0 {
+			retryAfter = time.Duration(sec) * time.Second
+		} else {
+			retryAfter = DefaultRateLimitBackoff
+		}
 	} else {
+		// We have no request, we probably received a rate limit message over the websocket
+		// which contains no details on how long we're actually rate limited for.
 		retryAfter = DefaultRateLimitBackoff
 	}
 
 	e.retryAt = time.Now().Add(retryAfter)
 
-	return fmt.Errorf("rate limited for %f seconds", retryAfter.Seconds())
+	return fmt.Errorf("rate limited for %f", retryAfter.Seconds())
+}
+
+func (e *Endpoint) IsOnline() bool {
+	return e.online
 }
 
 func (e *Endpoint) RateLimit() {
@@ -100,25 +109,22 @@ func (e *Endpoint) RateLimit() {
 
 func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
 	if !e.retryAt.IsZero() && time.Since(e.retryAt) < 0 {
-		return fmt.Errorf("rate limited for %f seconds", time.Since(e.retryAt).Seconds())
+		return fmt.Errorf("retrying in %s", time.Until(e.retryAt))
 	}
 
-	clientVersion, err := SendHTTPRPCRequest(context.Background(), e, "ha_clientVersion", NewRPCRequest("web3_clientVersion", []string{}))
+	clientVersion, err := SendHTTPRPCRequest(context.Background(), e, NewRPCRequest("ha_clientVersion", "web3_clientVersion", []string{}))
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
 	}
 
 	if _, ok := clientVersion.Result.(string); ok {
-		// err = fmt.Errorf("could not get a proper web3_clientVersion: %v", clientVersion.Error)
-		// e.SetStatus(false, err)
-		// return err
 		e.clientVersion = clientVersion.Result.(string)
 	} else {
-		e.clientVersion = "unknown"
+		e.clientVersion = ""
 	}
 
-	chainId, err := SendHTTPRPCRequest(context.Background(), e, "ha_chainId", NewRPCRequest("eth_chainId", []string{}))
+	chainId, err := SendHTTPRPCRequest(context.Background(), e, NewRPCRequest("ha_chainId", "eth_chainId", []string{}))
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
@@ -141,9 +147,19 @@ type Provider struct {
 	Kind     string      `yaml:"kind"`
 	Endpoint []*Endpoint `yaml:"endpoints"`
 
+	// Public indicates that the endpoint is public and that we
+	// will skip debug headers and detailed error messages to the client.
+	// TODO
+	Public bool `yaml:"public,omitempty"`
+
+	Xfwd bool `yaml:"xfwd,omitempty"`
+
 	requestCount       int
 	failedRequestCount int
 	openConnections    int
+
+	ActiveMu sync.RWMutex
+	Active   map[string]*WebSocketProxy
 }
 
 // GetActiveEndpoints returns a list of endpoints that are currently considered online
@@ -152,11 +168,11 @@ func (p *Provider) GetActiveEndpoints() []*Endpoint {
 
 	for _, e := range p.Endpoint {
 
-		// backoff
-
-		if e.online {
-			active = append(active, e)
+		if !e.online {
+			continue
 		}
+
+		active = append(active, e)
 	}
 
 	return active

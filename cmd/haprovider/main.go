@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,18 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	servertiming "github.com/mitchellh/go-server-timing"
 	. "github.com/wille/haprovider/internal"
 )
 
-var addr = flag.String("addr", "0.0.0.0:8080", "http service address")
-var configFile = flag.String("config", "config.yml", "config file")
-var verbose = flag.Bool("verbose", false, "verbose logging")
-
 // Incoming requests
 func requestHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	// Create a new timing handler
-	timing := servertiming.FromContext(r.Context())
+	timing := servertiming.FromContext(ctx)
 
 	id := r.PathValue("id")
 
@@ -38,19 +38,45 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Header.Get("Upgrade") == "websocket" {
-		IncomingWebsocketHandler(r.Context(), provider, w, r, timing)
+		IncomingWebsocketHandler(ctx, provider, w, r, timing)
 		return
 	}
 
-	IncomingHttpHandler(r.Context(), provider, w, r, timing)
+	IncomingHttpHandler(ctx, provider, w, r, timing)
 }
 
-var config = LoadConfig()
+var config *Config
+
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 func main() {
-	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	var addr = flag.String("addr", getEnvWithDefault("HA_ADDR", "0.0.0.0:8080"), "http service address ($HA_ADDR)")
+	var configFile = flag.String("config", "config.yml", "config file (Raw config can be provided via $HA_CONFIG)")
+	var debug = flag.Bool("debug", getEnvWithDefault("HA_DEBUG", "false") == "true", "debug logging ($HA_DEBUG)")
+	var json = flag.Bool("json", getEnvWithDefault("HA_JSON", "false") == "true", "json logging ($HA_JSON)")
 
 	flag.Parse()
+
+	config = LoadConfig(*configFile)
+
+	level := slog.LevelInfo
+
+	if *debug {
+		level = slog.LevelDebug
+	}
+
+	if *json {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: level,
+		})))
+	} else {
+		slog.SetLogLoggerLevel(level)
+	}
 
 	timingMiddleware := servertiming.Middleware(http.HandlerFunc(requestHandler), nil)
 
@@ -60,6 +86,8 @@ func main() {
 		if provider.ChainID == 0 {
 			log.Printf("ChainID not set for provider %v, skipping validation\n", provider)
 		}
+
+		provider.Active = make(map[string]*WebSocketProxy)
 
 		switch provider.Kind {
 		case "", "eth", "solana", "btc":
@@ -159,11 +187,24 @@ func main() {
 
 	log.Printf("shutting down...")
 
-	for _, conn := range ActiveConnections {
-		conn.Close(fmt.Errorf("shutting down"))
+	wg = sync.WaitGroup{}
+	for _, provider := range config.Providers {
+		provider.ActiveMu.RLock()
+		for _, conn := range provider.Active {
+			wg.Add(1)
+			go func() {
+				conn.Close(fmt.Errorf("shutting down"))
+				conn.ProviderConn.Close(websocket.CloseGoingAway, nil)
+				conn.ClientConn.Close(websocket.CloseGoingAway, nil)
+				wg.Done()
+			}()
+		}
+		provider.ActiveMu.RUnlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	wg.Wait()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	server.Shutdown(ctx)

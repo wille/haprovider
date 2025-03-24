@@ -2,19 +2,19 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/eth"
 
 	"github.com/gorilla/websocket"
 )
@@ -32,22 +32,23 @@ const (
 	pingPeriod = 5 * time.Second
 )
 
-var (
-	ActiveConnections   = make(map[string]*WebSocketProxy)
-	activeConnectionsMu = sync.RWMutex{}
-)
-
 type WebSocketProxy struct {
+	// The request context
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+
+	log *slog.Logger
 
 	provider *Provider
 	endpoint *Endpoint
 
+	// The ID of the proxy
 	ID string
 
+	// ClientConn is the incoming client connection
 	ClientConn *Client
 
+	// ProviderConn is the upstream provider connection
 	ProviderConn *Client
 
 	// Client requests to be sent to the provider
@@ -56,35 +57,21 @@ type WebSocketProxy struct {
 	// Provider responses to be sent to the client
 	Responses chan *RPCResponse
 
-	listeners map[string]chan *RPCResponse
+	subscriptions map[string]chan *RPCResponse
 
-	closed bool
+	badRequests int
 }
 
-func (r *WebSocketProxy) SendRPCRequest(req *RPCRequest) error {
-	b := SerializeRPCRequest(req)
-
-	select {
-	case r.ProviderConn.send <- b:
-	case <-r.ProviderConn.ctx.Done():
-		return fmt.Errorf("provider connection closed")
-	}
-
-	return nil
-}
-
-func (r *WebSocketProxy) AwaitReply(ctx context.Context, requestID string, req *RPCRequest) (*RPCResponse, error) {
-	req.ID = requestID
-
+func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest) (*RPCResponse, error) {
 	ch := make(chan *RPCResponse, 1)
 	defer close(ch)
 
-	r.listeners[requestID] = ch
-	defer delete(r.listeners, requestID)
+	id := GetRequestIDString(req.ID)
 
-	if err := r.SendRPCRequest(req); err != nil {
-		return nil, err
-	}
+	r.subscriptions[id] = ch
+	defer delete(r.subscriptions, id)
+
+	r.Requests <- req
 
 	select {
 	case reply := <-ch:
@@ -94,40 +81,29 @@ func (r *WebSocketProxy) AwaitReply(ctx context.Context, requestID string, req *
 	}
 }
 
-func (r *WebSocketProxy) healthcheck() error {
+func (r *WebSocketProxy) Healthcheck() error {
+	ctx, cancel := context.WithTimeout(r.ctx, time.Second)
+	defer cancel()
+
 	// Skip chainID validation if not set in config
 	if r.provider.ChainID != 0 {
-		res, err := r.AwaitReply(r.ctx, "ha_chainId", NewRPCRequest("eth_chainId", nil))
+		res, err := r.AwaitReply(ctx, NewRPCRequest("ha_chainId", "eth_chainId", nil))
 		if err != nil {
 			return err
 		}
 
-		i, err := HexToInt(res.Result.(string))
-		if err != nil {
-			return fmt.Errorf("invalid chainId received: %s (%s)", res.Result, err)
-		}
-
-		if int(i) != r.provider.ChainID {
-			return fmt.Errorf("chainId mismatch: received=%d, expected=%d", i, r.provider.ChainID)
+		if res.Result.(string) != fmt.Sprintf("0x%x", r.provider.ChainID) {
+			err = fmt.Errorf("chainId mismatch: received=%s, expected=%d", res.Result, r.provider.ChainID)
+			return err
 		}
 	}
 
-	return nil
-}
+	_, err := r.AwaitReply(ctx, NewRPCRequest("ha_height", "eth_blockNumber", nil))
+	if err != nil {
+		return err
+	}
 
-var closeCodeText = map[int]string{
-	websocket.CloseNormalClosure:      "normal close",
-	websocket.CloseGoingAway:          "going away",
-	websocket.CloseProtocolError:      "protocol error",
-	websocket.CloseUnsupportedData:    "unsupported data",
-	websocket.CloseNoStatusReceived:   "no status received",
-	websocket.CloseAbnormalClosure:    "abnormal closure",
-	websocket.CloseServiceRestart:     "service restart",
-	websocket.CloseTryAgainLater:      "try again later",
-	websocket.CloseTLSHandshake:       "TLS handshake",
-	websocket.CloseMessageTooBig:      "message too big",
-	websocket.CloseMandatoryExtension: "mandatory extension",
-	websocket.CloseInternalServerErr:  "internal server error",
+	return nil
 }
 
 // Close destroys the proxy connection.
@@ -136,7 +112,7 @@ func (p *WebSocketProxy) Close(reason error) {
 	p.cancel(reason)
 }
 
-func DialWebSocketProvider(provider *Provider, endpoint *Endpoint, proxy *WebSocketProxy) error {
+func (proxy *WebSocketProxy) DialProvider(provider *Provider, endpoint *Endpoint) error {
 	u, _ := url.Parse(endpoint.Ws)
 
 	headers := http.Header{}
@@ -163,24 +139,24 @@ func DialWebSocketProvider(provider *Provider, endpoint *Endpoint, proxy *WebSoc
 		return endpoint.HandleTooManyRequests(resp)
 	default:
 		ws.Close()
-		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+		return fmt.Errorf("status code %d", resp.StatusCode)
 	}
 
-	providerClient := NewClient(context.TODO(), nil, ws)
+	providerClient := NewClient(ws)
 
 	proxy.ProviderConn = providerClient
 	proxy.endpoint = endpoint
 
 	go proxy.pumpProvider(proxy.ProviderConn)
 
-	clientVersion, err := proxy.AwaitReply(proxy.ctx, "ha_clientVersion", NewRPCRequest("web3_clientVersion", nil))
+	clientVersion, err := proxy.AwaitReply(ctx, NewRPCRequest("ha_clientVersion", "web3_clientVersion", nil))
 	if err != nil {
 		providerClient.Close(websocket.CloseNormalClosure, nil)
 		return fmt.Errorf("web3_clientVersion error: %s", err)
 	}
 	endpoint.clientVersion = clientVersion.Result.(string)
 
-	if err = proxy.healthcheck(); err != nil {
+	if err = proxy.Healthcheck(); err != nil {
 		providerClient.Close(websocket.CloseNormalClosure, nil)
 		return fmt.Errorf("healthcheck failed: %s", err)
 	}
@@ -194,53 +170,52 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 		case <-providerClient.ctx.Done():
 			return
 		case req := <-proxy.Requests:
-			proxy.SendRPCRequest(req)
+			providerClient.Write(SerializeRPCRequest(req))
 		case message := <-providerClient.Read():
 			if strings.Contains(string(message), "error") {
 				log.Println("error:", string(message))
 			}
 
-			var rpcCall RPCResponse
-			err := json.Unmarshal(message, &rpcCall)
+			rpcResponse, err := DecodeRPCResponse(message)
 			if err != nil {
-				proxy.Close(fmt.Errorf("received bad data: %s, msg: %s", err, FormatRawBody(string(message))))
+				err := fmt.Errorf("received bad data from provider: %s, msg: %s", err, FormatRawBody(string(message)))
+				proxy.Close(err)
 				proxy.ProviderConn.Close(websocket.CloseUnsupportedData, nil)
-				proxy.ClientConn.Close(websocket.CloseUnsupportedData, fmt.Errorf("received bad data: %s, msg: %s", err, FormatRawBody(string(message))))
+				proxy.ClientConn.Close(websocket.CloseUnsupportedData, err)
 				proxy.provider.failedRequestCount++
 				return
 			}
 
-			reqID, _ := GetClientID(rpcCall.ID)
+			proxy.provider.requestCount++
 
+			id := GetRequestIDString(rpcResponse.ID)
 			// Intercept
-			if ch := proxy.listeners[reqID]; ch != nil {
-				ch <- &rpcCall
+			if ch := proxy.subscriptions[id]; ch != nil {
+				ch <- rpcResponse
 				continue
 			}
 
-			// TODO log subscription messages
-			proxy.provider.requestCount++
+			if rpcResponse.IsError() {
+				errorCode, _ := rpcResponse.GetError()
 
-			proxy.Responses <- &rpcCall
+				if errorCode == eth.RateLimited {
+					// Set the provider as offline
+					err = proxy.endpoint.HandleTooManyRequests(nil)
+					proxy.endpoint.SetStatus(false, err)
 
-			// -32005
-			if rpcCall.Error != nil {
-				fmt.Println(rpcCall.Error.(map[string]any)["code"])
-				if rpcCall.Error.(map[string]any)["code"].(float64) == -32005 {
-					// TODO rate limited!
-					r := fmt.Errorf("rate limited by provider: %s", rpcCall.Error.(map[string]any)["message"])
-					// proxy.cancel(fmt.Errorf("rate limit and die"))
-					proxy.Close(r)
-					proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("disconnecting because we got rate limited"))
-					proxy.ClientConn.Close(websocket.CloseServiceRestart, r)
+					// Forward the error to the client
+					proxy.Responses <- rpcResponse
 
+					// Close the connection
+					proxy.Close(err)
+					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+					proxy.ClientConn.Close(websocket.CloseTryAgainLater, err)
 					proxy.provider.failedRequestCount++
-
-					// log.Printf("rate limited! disconnecting from %s: %s", proxy.endpoint.GetName(), rpcCall.Error.(map[string]any)["message"])
-
 					return
 				}
 			}
+
+			proxy.Responses <- rpcResponse
 		}
 	}
 }
@@ -252,23 +227,37 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			return
 		case message, ok := <-proxy.ClientConn.Read():
 			if !ok {
-				log.Printf("ClientConn read closed")
+				proxy.log.Debug("ClientConn read closed")
 				continue
 			}
 
-			var req RPCRequest
-			err := json.Unmarshal(message, &req)
+			req, err := DecodeRPCRequest(message)
 			if err != nil {
-				log.Printf("bad client request. ignoring: %s, msg: %s", err, FormatRawBody(string(message)))
+				proxy.log.Debug("bad client request. ignoring: %s, msg: %s", err, FormatRawBody(string(message)))
+
+				proxy.badRequests++
+
+				// Drop clients who sends too many bad requests
+				if proxy.badRequests > 10 {
+					proxy.Close(fmt.Errorf("closing client: too many bad requests"))
+					proxy.ClientConn.Close(websocket.CloseUnsupportedData, nil)
+					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+					return
+				}
+
 				continue
 			}
 
-			log.Printf("%s %s [%f] %s\n", proxy.ClientConn.Conn.RemoteAddr().String(), proxy.endpoint.GetName(), req.ID, req.Method)
+			// Reset the bad request counter
+			proxy.badRequests = 0
 
-			proxy.Requests <- &req
+			proxy.Requests <- req
+
+			id := GetRequestIDString(req.ID)
+			proxy.log.Debug("request", "rpc_id", id, "method", req.Method)
 		case rpcResponse, ok := <-proxy.Responses:
 			if !ok {
-				log.Printf("proxy.Responses closed")
+				proxy.log.Debug("proxy.Responses closed")
 				continue
 			}
 			ss := SerializeRPCResponse(rpcResponse)
@@ -279,14 +268,14 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 }
 
 // DialAnyProvider dials any provider and returns a WebSocketProxy
-func DialAnyProvider(provider *Provider, proxy *WebSocketProxy, timing *servertiming.Header) (*Endpoint, error) {
+func (proxy *WebSocketProxy) DialAnyProvider(provider *Provider, timing *servertiming.Header) (*Endpoint, error) {
 	for _, endpoint := range provider.GetActiveEndpoints() {
 		if endpoint.Ws == "" {
 			continue
 		}
 
 		m := timing.NewMetric(endpoint.GetName()).Start()
-		err := DialWebSocketProvider(provider, endpoint, proxy)
+		err := proxy.DialProvider(provider, endpoint)
 		m.Stop()
 
 		// In case the request was closed before the provider connection was established
@@ -316,63 +305,77 @@ func DialAnyProvider(provider *Provider, proxy *WebSocketProxy, timing *serverti
 }
 
 func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+	start := time.Now()
+
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		ID:        r.RemoteAddr,
-		ctx:       ctx,
-		cancel:    cancel,
-		provider:  provider,
-		Responses: make(chan *RPCResponse, 32),
-		Requests:  make(chan *RPCRequest, 32),
-		listeners: make(map[string]chan *RPCResponse),
+		ID:            GetRequestID(r),
+		log:           slog.With("ip", r.RemoteAddr, "provider", provider.Name),
+		ctx:           ctx,
+		cancel:        cancel,
+		provider:      provider,
+		Responses:     make(chan *RPCResponse, 32),
+		Requests:      make(chan *RPCRequest, 32),
+		subscriptions: make(map[string]chan *RPCResponse),
 	}
 
-	activeConnectionsMu.Lock()
-	ActiveConnections[proxy.ID] = proxy
-	activeConnectionsMu.Unlock()
-	defer func() {
-		activeConnectionsMu.Lock()
-		delete(ActiveConnections, proxy.ID)
-		activeConnectionsMu.Unlock()
-	}()
+	// provider.ActiveMu.Lock()
+	// provider.Active[r.RemoteAddr] = proxy
+	// provider.ActiveMu.Unlock()
+	// defer func() {
+	// 	provider.ActiveMu.Lock()
+	// 	delete(provider.Active, r.RemoteAddr)
+	// 	provider.ActiveMu.Unlock()
+	// }()
+
+	fmt.Println("dialing provider")
 
 	// Dial any provider before upgrading the websocket
-	endpoint, err := DialAnyProvider(provider, proxy, timing)
+	endpoint, err := proxy.DialAnyProvider(provider, timing)
 
 	if err == ErrNoProvidersAvailable {
-		log.Printf("%s [%s]: no providers available", proxy.ID, provider.Name)
+		proxy.log.Error("no providers available")
 		http.Error(w, "no providers available", http.StatusServiceUnavailable)
 		return
 	}
 
 	if err != nil {
-		log.Printf("error dialing provider: %s", err)
-		http.Error(w, "error dialing provider: "+err.Error(), http.StatusInternalServerError)
+		select {
+		case <-proxy.ctx.Done():
+			proxy.log.Error("client closed the connection", "error", err)
+		default:
+			proxy.log.Error("error dialing provider", "error", err)
+			http.Error(w, "error dialing provider: "+err.Error(), http.StatusInternalServerError)
+		}
+
 		return
 	}
 
-	w.Header().Set("X-Provider", endpoint.GetName())
+	if !provider.Public {
+		w.Header().Set("X-Provider", endpoint.GetName())
+	}
+
+	if provider.Xfwd {
+		AddXfwdHeaders(r, w)
+	}
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println("Error upgrading connection", err)
-		proxy.ProviderConn.Close(websocket.CloseNormalClosure, fmt.Errorf(""))
+		proxy.log.Error("error upgrading connection", "error", err)
+		proxy.ProviderConn.Close(websocket.CloseNormalClosure, nil)
 		return
 	}
 
-	proxy.ClientConn = NewClient(context.TODO(), nil, ws)
+	proxy.ClientConn = NewClient(ws)
+	go proxy.pumpClient(proxy.ClientConn)
 
-	log.Printf("ws open %s -> %s [%s]\n", proxy.ID, endpoint.GetName(), endpoint.clientVersion)
-	logClose := func(reason error) {
-		log.Printf("ws close %s -> %s: %s", proxy.ID, endpoint.GetName(), reason)
-	}
+	proxy.log = proxy.log.With("endpoint", endpoint.GetName())
+	proxy.log.Info("ws open", "client_version", endpoint.clientVersion, "request_time", time.Since(start))
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-
-	go proxy.pumpClient(proxy.ClientConn)
 
 	for {
 		select {
@@ -383,15 +386,15 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 			return
 		case <-proxy.ctx.Done():
 			// We closed the connection
-			logClose(context.Cause(proxy.ctx))
+			proxy.log.Error("ws closed", "error", context.Cause(proxy.ctx))
 			return
 		case <-proxy.ClientConn.ctx.Done():
-			logClose(fmt.Errorf("client connection closed: %s", context.Cause(proxy.ClientConn.ctx)))
-			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %s", context.Cause(proxy.ClientConn.ctx)))
+			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx))
+			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %w", context.Cause(proxy.ClientConn.ctx)))
 			return
 		case <-proxy.ProviderConn.ctx.Done():
-			logClose(fmt.Errorf("provider connection closed: %s", context.Cause(proxy.ProviderConn.ctx)))
-			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %s", context.Cause(proxy.ProviderConn.ctx)))
+			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx))
+			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %w", context.Cause(proxy.ProviderConn.ctx)))
 			return
 		}
 	}

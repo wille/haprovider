@@ -32,8 +32,8 @@ type Client struct {
 	Latency time.Duration
 }
 
-func NewClient(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn) *Client {
-	ctx, cancel = context.WithCancelCause(context.Background())
+func NewClient(conn *websocket.Conn) *Client {
+	ctx, cancel := context.WithCancelCause(context.Background())
 	client := &Client{
 		ctx:       ctx,
 		cancel:    cancel,
@@ -78,12 +78,12 @@ func (c *Client) Close(closeCode int, text error) {
 		c.close <- websocket.FormatCloseMessage(closeCode, "")
 	}
 
+	close(c.close)
+
 	// Remember that <-close will ws.Close()
 	c.stop(text)
 
 	// c.pingTimer.Stop()
-
-	// close(c.close)
 
 }
 
@@ -115,7 +115,6 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
-	defer close(c.close)
 	defer c.pingTimer.Stop()
 
 	for {

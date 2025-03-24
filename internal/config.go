@@ -19,10 +19,10 @@ type Config struct {
 	Providers map[string]*Provider `yaml:"providers"`
 }
 
-func LoadConfig() *Config {
-	configFromEnv := os.Getenv("HAPROVIDER_CONFIG")
+func LoadConfig(configFile string) *Config {
+	configFromEnv := os.Getenv("HA_CONFIG")
 	if configFromEnv == "" {
-		z, err := os.ReadFile("config.yml")
+		z, err := os.ReadFile(configFile)
 		if err != nil {
 			panic(err)
 		}

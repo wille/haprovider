@@ -57,31 +57,28 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create a provider and endpoint
-	endpoint := &Endpoint{
-		Name:         "test-rate-limit",
-		ProviderName: "test-provider",
-		Http:         server.URL,
-		online:       true, // Start with the endpoint online
+	// Create a provider to test GetActiveEndpoints
+	provider := &Provider{
+		ChainID: 1,
+		Endpoint: []*Endpoint{{
+			Name:         "test-rate-limit",
+			ProviderName: "test-provider",
+			Http:         server.URL,
+			online:       true, // Start with the endpoint online
+		}},
 	}
 
 	// Send a request that will trigger rate limiting
-	_, err := SendHTTPRequest(context.Background(), endpoint, []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`))
+	_, _, err := ProxyHTTP(context.Background(), provider, []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`), &servertiming.Header{})
 
 	// Verify the error and retry time was set correctly
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "rate limited")
+	assert.Contains(t, err.Error(), ErrNoProvidersAvailable.Error())
 
 	// Verify retry time is in the future (between now and now+10s)
-	assert.False(t, endpoint.retryAt.IsZero())
-	assert.True(t, endpoint.retryAt.After(time.Now()))
-	assert.True(t, endpoint.retryAt.Before(time.Now().Add(10*time.Second)))
-
-	// Create a provider to test GetActiveEndpoints
-	provider := &Provider{
-		ChainID:  1,
-		Endpoint: []*Endpoint{endpoint},
-	}
+	assert.False(t, provider.Endpoint[0].retryAt.IsZero())
+	assert.True(t, provider.Endpoint[0].retryAt.After(time.Now()))
+	assert.True(t, provider.Endpoint[0].retryAt.Before(time.Now().Add(30*time.Second)))
 
 	// Verify endpoint is not returned as active during rate limiting
 	active := provider.GetActiveEndpoints()
