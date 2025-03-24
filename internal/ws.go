@@ -61,7 +61,7 @@ type WebSocketProxy struct {
 	badRequests int
 }
 
-func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest) (*RPCResponse, error) {
+func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest, errRpcError bool) (*RPCResponse, error) {
 	ch := make(chan *RPCResponse, 1)
 	defer close(ch)
 
@@ -74,6 +74,11 @@ func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest) (*RPCR
 
 	select {
 	case reply := <-ch:
+		if errRpcError && reply.IsError() {
+			_, err := reply.GetError()
+			return reply, err
+		}
+
 		return reply, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -81,28 +86,7 @@ func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest) (*RPCR
 }
 
 func (r *WebSocketProxy) Healthcheck() error {
-	ctx, cancel := context.WithTimeout(r.ctx, time.Second)
-	defer cancel()
-
-	// Skip chainID validation if not set in config
-	if r.provider.ChainID != 0 {
-		res, err := r.AwaitReply(ctx, NewRPCRequest("ha_chainId", "eth_chainId", nil))
-		if err != nil {
-			return err
-		}
-
-		if res.Result.(string) != fmt.Sprintf("0x%x", r.provider.ChainID) {
-			err = fmt.Errorf("chainId mismatch: received=%s, expected=%d", res.Result, r.provider.ChainID)
-			return err
-		}
-	}
-
-	_, err := r.AwaitReply(ctx, NewRPCRequest("ha_height", "eth_blockNumber", nil))
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return r.endpoint.Healthcheck(r.provider)
 }
 
 // Close destroys the proxy connection.
@@ -148,13 +132,6 @@ func (proxy *WebSocketProxy) DialProvider(provider *Provider, endpoint *Endpoint
 
 	go proxy.pumpProvider(proxy.ProviderConn)
 
-	clientVersion, err := proxy.AwaitReply(ctx, NewRPCRequest("ha_clientVersion", "web3_clientVersion", nil))
-	if err != nil {
-		providerClient.Close(websocket.CloseNormalClosure, nil)
-		return fmt.Errorf("web3_clientVersion error: %s", err)
-	}
-	endpoint.clientVersion = clientVersion.Result.(string)
-
 	if err = proxy.Healthcheck(); err != nil {
 		providerClient.Close(websocket.CloseNormalClosure, nil)
 		return fmt.Errorf("healthcheck failed: %s", err)
@@ -195,7 +172,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			}
 
 			if rpcResponse.IsError() {
-				errorCode, _ := rpcResponse.GetError()
+				errorCode, errorMessage := rpcResponse.GetError()
 
 				if errorCode == RateLimited {
 					// Set the provider as offline
@@ -211,6 +188,8 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 					proxy.ClientConn.Close(websocket.CloseTryAgainLater, err)
 					proxy.provider.failedRequestCount++
 					return
+				} else {
+					proxy.log.Debug("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
 				}
 			}
 
@@ -327,8 +306,6 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 	// 	delete(provider.Active, r.RemoteAddr)
 	// 	provider.ActiveMu.Unlock()
 	// }()
-
-	fmt.Println("dialing provider")
 
 	// Dial any provider before upgrading the websocket
 	endpoint, err := proxy.DialAnyProvider(provider, timing)

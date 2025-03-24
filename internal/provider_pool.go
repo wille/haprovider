@@ -108,30 +108,13 @@ func (e *Endpoint) RateLimit() {
 }
 
 func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
+	// TODO move to healthcheck loop
 	if !e.retryAt.IsZero() && time.Since(e.retryAt) < 0 {
 		return fmt.Errorf("retrying in %s", time.Until(e.retryAt))
 	}
 
-	clientVersion, err := SendHTTPRPCRequest(context.Background(), e, NewRPCRequest("ha_clientVersion", "web3_clientVersion", []string{}))
+	err := e.Healthcheck(p)
 	if err != nil {
-		e.SetStatus(false, err)
-		return err
-	}
-
-	if _, ok := clientVersion.Result.(string); ok {
-		e.clientVersion = clientVersion.Result.(string)
-	} else {
-		e.clientVersion = ""
-	}
-
-	chainId, err := SendHTTPRPCRequest(context.Background(), e, NewRPCRequest("ha_chainId", "eth_chainId", []string{}))
-	if err != nil {
-		e.SetStatus(false, err)
-		return err
-	}
-
-	if chainId.Result.(string) != fmt.Sprintf("0x%x", p.ChainID) {
-		err = fmt.Errorf("chainId mismatch: received=%s, expected=%d", chainId.Result, p.ChainID)
 		e.SetStatus(false, err)
 		return err
 	}
@@ -176,4 +159,22 @@ func (p *Provider) GetActiveEndpoints() []*Endpoint {
 	}
 
 	return active
+}
+
+func (e *Endpoint) Healthcheck(p *Provider) error {
+	ctx := context.TODO()
+
+	fn := func(ctx context.Context, req *RPCRequest, errRpcError bool) (*RPCResponse, error) {
+		// TODO errRpcError
+		return SendHTTPRPCRequest(ctx, e, req)
+	}
+
+	switch p.Kind {
+	case "eth":
+		return EthereumHealthCheck(ctx, p, e, fn)
+	case "solana":
+		return SolanaHealthcheck(ctx, p, e, fn)
+	}
+
+	return nil
 }

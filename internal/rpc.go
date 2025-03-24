@@ -1,11 +1,14 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+type RPCReaderFunc func(ctx context.Context, req *RPCRequest, errRpcError bool) (*RPCResponse, error)
 
 type RPCRequest struct {
 	Version string `json:"jsonrpc"`

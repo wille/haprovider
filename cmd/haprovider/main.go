@@ -83,17 +83,12 @@ func main() {
 	http.Handle("/{id}", timingMiddleware)
 
 	for name, provider := range config.Providers {
-		if provider.ChainID == 0 {
-			log.Printf("ChainID not set for provider %v, skipping validation\n", provider)
-		}
-
 		provider.Active = make(map[string]*WebSocketProxy)
 
 		switch provider.Kind {
-		case "", "eth", "solana", "btc":
-			if provider.Kind == "" {
-				provider.Kind = "eth"
-			}
+		case "", "eth":
+			provider.Kind = "eth"
+		case "solana", "btc":
 		default:
 			log.Fatalf("Unknown provider kind %s", provider.Kind)
 		}
