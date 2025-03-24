@@ -14,7 +14,6 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
-	"github.com/wille/haprovider/internal/eth"
 
 	"github.com/gorilla/websocket"
 )
@@ -198,7 +197,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			if rpcResponse.IsError() {
 				errorCode, _ := rpcResponse.GetError()
 
-				if errorCode == eth.RateLimited {
+				if errorCode == RateLimited {
 					// Set the provider as offline
 					err = proxy.endpoint.HandleTooManyRequests(nil)
 					proxy.endpoint.SetStatus(false, err)
@@ -233,7 +232,7 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			req, err := DecodeRPCRequest(message)
 			if err != nil {
-				proxy.log.Debug("bad client request. ignoring: %s, msg: %s", err, FormatRawBody(string(message)))
+				proxy.log.Debug("bad client request", "error", err, "msg", FormatRawBody(string(message)))
 
 				proxy.badRequests++
 

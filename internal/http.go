@@ -114,21 +114,21 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 	log := slog.With("ip", r.RemoteAddr, "provider", provider.Name)
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		log.Error("http: close %s -> %s: bad request", GetRequestID(r), provider.Name)
+		log.Error("http: close connection: invalid content type")
 		http.Error(w, "invalid content type", http.StatusBadRequest)
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Error("http: error %s -> %s: error reading body", GetRequestID(r), provider.Name)
+		log.Error("http: error reading body", "error", err)
 		http.Error(w, "error reading body", http.StatusInternalServerError)
 		return
 	}
 
 	rpcReq, err := DecodeRPCRequest(body)
 	if err != nil {
-		log.Error("http: error %s -> %s: bad request: %s", GetRequestID(r), provider.Name, err)
+		log.Error("http: bad request", "error", err, "msg", FormatRawBody(string(body)))
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -138,13 +138,13 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 	pbody, endpoint, err := ProxyHTTP(ctx, provider, body, timing)
 
 	if err == ErrNoProvidersAvailable {
-		log.Error("no providers available", "error", err)
+		log.Error("no providers available")
 		http.Error(w, "no providers available", http.StatusServiceUnavailable)
 		return
 	}
 
 	if err != nil {
-		log.Error("error", "error", err)
+		log.Error("error proxying request", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -165,7 +165,7 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 
 	_, err = w.Write(pbody)
 	if err != nil {
-		log.Error("error writing body: %s", err)
+		log.Error("error writing body", "error", err)
 		return
 	}
 }
