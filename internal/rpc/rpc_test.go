@@ -1,4 +1,4 @@
-package internal
+package rpc
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 func TestRPCResponse_IsError(t *testing.T) {
 	raw := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Internal error"}}`
 
-	rpcResponse, err := DecodeRPCResponse([]byte(raw))
+	rpcResponse, err := DecodeResponse([]byte(raw))
 	if err != nil {
 		t.Fatalf("error decoding RPC response: %v", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 const (
@@ -15,15 +17,15 @@ var ErrorCodeText = map[int]string{
 	RateLimited: "rate limited",
 }
 
-type Healthcheck func(ctx context.Context, p *Provider, e *Endpoint, read RPCReaderFunc) error
+type Healthcheck func(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error
 
 var (
 	_ Healthcheck = EthereumHealthCheck
 	_ Healthcheck = SolanaHealthcheck
 )
 
-func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read RPCReaderFunc) error {
-	clientVersion, err := read(ctx, NewRPCRequest("ha_clientVersion", "web3_clientVersion", []string{}), true)
+func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error {
+	clientVersion, err := read(ctx, rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}), true)
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
@@ -34,7 +36,7 @@ func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read RPC
 		e.clientVersion = clientVersion.Result.(string)
 	}
 
-	res, err := read(ctx, NewRPCRequest("ha_chainId", "eth_chainId", nil), true)
+	res, err := read(ctx, rpc.NewRequest("ha_chainId", "eth_chainId", nil), true)
 	if err != nil {
 		return err
 	}
@@ -49,7 +51,7 @@ func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read RPC
 		log.Printf("chainId is not set, received=%s", res.Result)
 	}
 
-	res, err = read(ctx, NewRPCRequest("ha_height", "eth_blockNumber", nil), true)
+	res, err = read(ctx, rpc.NewRequest("ha_height", "eth_blockNumber", nil), true)
 	if err != nil {
 		return err
 	}
@@ -61,8 +63,8 @@ func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read RPC
 	return nil
 }
 
-func SolanaHealthcheck(ctx context.Context, provider *Provider, endpoint *Endpoint, read RPCReaderFunc) error {
-	res, err := read(ctx, NewRPCRequest("ha_version", "getVersion", nil), true)
+func SolanaHealthcheck(ctx context.Context, provider *Provider, endpoint *Endpoint, read rpc.ReaderFunc) error {
+	res, err := read(ctx, rpc.NewRequest("ha_version", "getVersion", nil), true)
 	if err != nil {
 		return err
 	}
@@ -71,12 +73,12 @@ func SolanaHealthcheck(ctx context.Context, provider *Provider, endpoint *Endpoi
 		endpoint.clientVersion = r["solana-core"].(string)
 	}
 
-	res, err = read(ctx, NewRPCRequest("ha_health", "getHealth", nil), true)
+	res, err = read(ctx, rpc.NewRequest("ha_health", "getHealth", nil), true)
 	if err != nil {
 		return err
 	}
 
-	res, err = read(ctx, NewRPCRequest("ha_height", "getBlockHeight", nil), true)
+	res, err = read(ctx, rpc.NewRequest("ha_height", "getBlockHeight", nil), true)
 	if err != nil {
 		return err
 	}

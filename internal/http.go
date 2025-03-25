@@ -12,6 +12,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 var defaultClient = &http.Client{
@@ -86,21 +87,21 @@ func SendHTTPRequest(ctx context.Context, endpoint *Endpoint, body []byte) ([]by
 	case http.StatusTooManyRequests:
 		return nil, endpoint.HandleTooManyRequests(resp)
 	default:
-		return nil, fmt.Errorf("status code %d, %s", resp.StatusCode, FormatRawBody(string(b)))
+		return nil, fmt.Errorf("status code %d, %s", resp.StatusCode, rpc.FormatRawBody(string(b)))
 	}
 
 	return b, nil
 }
 
-func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, rpcreq *RPCRequest) (*RPCResponse, error) {
-	req := SerializeRPCRequest(rpcreq)
+func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, rpcreq *rpc.Request) (*rpc.Response, error) {
+	req := rpc.SerializeRequest(rpcreq)
 
 	b, err := SendHTTPRequest(ctx, endpoint, req)
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := DecodeRPCResponse(b)
+	response, err := rpc.DecodeResponse(b)
 	if err != nil {
 		return nil, fmt.Errorf("bad response: %w, raw: %s", err, string(b))
 	}
@@ -126,14 +127,14 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 		return
 	}
 
-	rpcReq, err := DecodeRPCRequest(body)
+	rpcReq, err := rpc.DecodeRequest(body)
 	if err != nil {
-		log.Error("http: bad request", "error", err, "msg", FormatRawBody(string(body)))
+		log.Error("http: bad request", "error", err, "msg", rpc.FormatRawBody(string(body)))
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	log = log.With("rpc_id", GetRequestIDString(rpcReq.ID), "method", rpcReq.Method)
+	log = log.With("rpc_id", rpc.GetRequestIDString(rpcReq.ID), "method", rpcReq.Method)
 
 	pbody, endpoint, err := ProxyHTTP(ctx, provider, body, timing)
 

@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/rpc"
 
 	"github.com/gorilla/websocket"
 )
@@ -51,21 +51,21 @@ type WebSocketProxy struct {
 	ProviderConn *Client
 
 	// Client requests to be sent to the provider
-	Requests chan *RPCRequest
+	Requests chan *rpc.Request
 
 	// Provider responses to be sent to the client
-	Responses chan *RPCResponse
+	Responses chan *rpc.Response
 
-	subscriptions map[string]chan *RPCResponse
+	subscriptions map[string]chan *rpc.Response
 
 	badRequests int
 }
 
-func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *RPCRequest, errRpcError bool) (*RPCResponse, error) {
-	ch := make(chan *RPCResponse, 1)
+func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
+	ch := make(chan *rpc.Response, 1)
 	defer close(ch)
 
-	id := GetRequestIDString(req.ID)
+	id := rpc.GetRequestIDString(req.ID)
 
 	r.subscriptions[id] = ch
 	defer delete(r.subscriptions, id)
@@ -146,15 +146,15 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 		case <-providerClient.ctx.Done():
 			return
 		case req := <-proxy.Requests:
-			providerClient.Write(SerializeRPCRequest(req))
+			providerClient.Write(rpc.SerializeRequest(req))
 		case message := <-providerClient.Read():
 			if strings.Contains(string(message), "error") {
-				log.Println("error:", string(message))
+				slog.Warn("error", "msg", string(message), "endpoint", proxy.endpoint.GetName(), "ip", proxy.ClientConn.Conn.RemoteAddr())
 			}
 
-			rpcResponse, err := DecodeRPCResponse(message)
+			rpcResponse, err := rpc.DecodeResponse(message)
 			if err != nil {
-				err := fmt.Errorf("received bad data from provider: %s, msg: %s", err, FormatRawBody(string(message)))
+				err := fmt.Errorf("received bad data from provider: %s, msg: %s", err, rpc.FormatRawBody(string(message)))
 				proxy.Close(err)
 				proxy.ProviderConn.Close(websocket.CloseUnsupportedData, nil)
 				proxy.ClientConn.Close(websocket.CloseUnsupportedData, err)
@@ -164,7 +164,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 
 			proxy.provider.requestCount++
 
-			id := GetRequestIDString(rpcResponse.ID)
+			id := rpc.GetRequestIDString(rpcResponse.ID)
 			// Intercept
 			if ch := proxy.subscriptions[id]; ch != nil {
 				ch <- rpcResponse
@@ -209,9 +209,9 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 				continue
 			}
 
-			req, err := DecodeRPCRequest(message)
+			req, err := rpc.DecodeRequest(message)
 			if err != nil {
-				proxy.log.Debug("bad client request", "error", err, "msg", FormatRawBody(string(message)))
+				proxy.log.Debug("bad client request", "error", err, "msg", rpc.FormatRawBody(string(message)))
 
 				proxy.badRequests++
 
@@ -231,14 +231,14 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			proxy.Requests <- req
 
-			id := GetRequestIDString(req.ID)
+			id := rpc.GetRequestIDString(req.ID)
 			proxy.log.Debug("request", "rpc_id", id, "method", req.Method)
 		case rpcResponse, ok := <-proxy.Responses:
 			if !ok {
 				proxy.log.Debug("proxy.Responses closed")
 				continue
 			}
-			ss := SerializeRPCResponse(rpcResponse)
+			ss := rpc.SerializeResponse(rpcResponse)
 			proxy.ClientConn.Write(ss)
 
 		}
@@ -293,9 +293,9 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 		ctx:           ctx,
 		cancel:        cancel,
 		provider:      provider,
-		Responses:     make(chan *RPCResponse, 32),
-		Requests:      make(chan *RPCRequest, 32),
-		subscriptions: make(map[string]chan *RPCResponse),
+		Responses:     make(chan *rpc.Response, 32),
+		Requests:      make(chan *rpc.Request, 32),
+		subscriptions: make(map[string]chan *rpc.Response),
 	}
 
 	// provider.ActiveMu.Lock()

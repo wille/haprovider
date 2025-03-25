@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 var (
@@ -164,7 +166,7 @@ func (p *Provider) GetActiveEndpoints() []*Endpoint {
 func (e *Endpoint) Healthcheck(p *Provider) error {
 	ctx := context.TODO()
 
-	fn := func(ctx context.Context, req *RPCRequest, errRpcError bool) (*RPCResponse, error) {
+	fn := func(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
 		// TODO errRpcError
 		return SendHTTPRPCRequest(ctx, e, req)
 	}
