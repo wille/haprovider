@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/wille/haprovider/internal/rpc"
 )
 
 const (
+	DefaultHealthcheckInterval = 10 * time.Second
+
 	RateLimited = -32005
 	// -32603	Internal JSON-RPC error	This error is typically due to a bad or invalid payload
 )
@@ -27,7 +30,6 @@ var (
 func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error {
 	clientVersion, err := read(ctx, rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}), true)
 	if err != nil {
-		e.SetStatus(false, err)
 		return err
 	}
 

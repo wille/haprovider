@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	servertiming "github.com/mitchellh/go-server-timing"
 	. "github.com/wille/haprovider/internal"
 )
@@ -56,7 +54,7 @@ func getEnvWithDefault(key, defaultValue string) string {
 
 func main() {
 	var addr = flag.String("addr", getEnvWithDefault("HA_ADDR", "0.0.0.0:8080"), "http service address ($HA_ADDR)")
-	var configFile = flag.String("config", "config.yml", "config file (Raw config can be provided via $HA_CONFIG)")
+	var configFile = flag.String("config", getEnvWithDefault("HA_CONFIGFILE", "config.yml"), "config file ($HA_CONFIGFILE) (Raw config can be provided via $HA_CONFIG)")
 	var debug = flag.Bool("debug", getEnvWithDefault("HA_DEBUG", "false") == "true", "debug logging ($HA_DEBUG)")
 	var json = flag.Bool("json", getEnvWithDefault("HA_JSON", "false") == "true", "json logging ($HA_JSON)")
 
@@ -82,9 +80,7 @@ func main() {
 
 	http.Handle("/{id}", timingMiddleware)
 
-	for name, provider := range config.Providers {
-		provider.Active = make(map[string]*WebSocketProxy)
-
+	for providerName, provider := range config.Providers {
 		switch provider.Kind {
 		case "", "eth":
 			provider.Kind = "eth"
@@ -93,14 +89,10 @@ func main() {
 			log.Fatalf("Unknown provider kind %s", provider.Kind)
 		}
 
-		provider.Name = name
+		provider.Name = providerName
 
-		for i, endpoint := range provider.Endpoint {
-			endpoint.ProviderName = name
-
-			if endpoint.Name == "" {
-				endpoint.Name = fmt.Sprintf("%s/%d", name, i)
-			}
+		for _, endpoint := range provider.Endpoint {
+			endpoint.ProviderName = providerName
 			if endpoint.Ws != "" {
 				url, err := url.Parse(endpoint.Ws)
 
@@ -118,7 +110,7 @@ func main() {
 		}
 	}
 
-	log.Printf("Performing initial healthcheck...")
+	slog.Info("starting haprovider", "version", Version)
 
 	var wg sync.WaitGroup
 
@@ -127,9 +119,8 @@ func main() {
 
 	for name, provider := range config.Providers {
 		for _, endpoint := range provider.Endpoint {
-
 			if endpoint.Http != "" {
-				log.Printf("Connecting to %s/%s (%s)\n", name, endpoint.Name, endpoint.Http)
+				slog.Info("connecting to", "provider", name, "endpoint", endpoint.Name, "http", endpoint.Http)
 
 				wg.Add(1)
 				go func() {
@@ -143,18 +134,14 @@ func main() {
 
 					wg.Done()
 
-					c := time.NewTicker(10 * time.Second)
-					for {
-						select {
-						case <-c.C:
-							provider.HTTPHealthcheck(endpoint)
-						}
+					c := time.NewTicker(DefaultHealthcheckInterval)
+					for range c.C {
+						provider.HTTPHealthcheck(endpoint)
 					}
 				}()
 			} else if endpoint.Ws != "" {
-				// No initial healthcheck on websocket providers yet
-				// log.Printf("Connecting to %s\n", endpoint.Ws)
-				// NewWebsocketConnection(endpoint, endpoint)
+				// No initial healthcheck on websocket-only providers yet
+				slog.Warn("no http endpoint for provider. skipping healthcheck", "provider", name, "endpoint", endpoint.Name)
 				endpoint.SetStatus(true, nil)
 			}
 		}
@@ -162,16 +149,11 @@ func main() {
 
 	wg.Wait()
 
-	if total == 0 {
-		log.Fatalf("All providers offline")
-	}
-
-	log.Printf("%d/%d providers available\n", online, total)
-
 	server := http.Server{
-		Addr:    *addr,
-		Handler: http.DefaultServeMux,
+		Addr: *addr,
 	}
+
+	slog.Info("haprovider started", "addr", *addr, "online", online, "total", total)
 
 	go server.ListenAndServe()
 
@@ -180,29 +162,12 @@ func main() {
 
 	<-interrupt
 
-	log.Printf("shutting down...")
+	slog.Info("shutting down...")
 
-	wg = sync.WaitGroup{}
-	for _, provider := range config.Providers {
-		provider.ActiveMu.RLock()
-		for _, conn := range provider.Active {
-			wg.Add(1)
-			go func() {
-				conn.Close(fmt.Errorf("shutting down"))
-				conn.ProviderConn.Close(websocket.CloseGoingAway, nil)
-				conn.ClientConn.Close(websocket.CloseGoingAway, nil)
-				wg.Done()
-			}()
-		}
-		provider.ActiveMu.RUnlock()
-	}
-
-	wg.Wait()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	server.Shutdown(ctx)
 
-	log.Printf("shutdown complete")
+	slog.Info("shutdown complete")
 }

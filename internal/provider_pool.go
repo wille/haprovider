@@ -36,10 +36,6 @@ type Endpoint struct {
 	m sync.Mutex
 }
 
-func (e *Endpoint) GetName() string {
-	return fmt.Sprintf("%s/%s", e.ProviderName, e.Name)
-}
-
 func (e *Endpoint) GetTimeout() time.Duration {
 	if e.Timeout > 0 {
 		return e.Timeout
@@ -51,17 +47,26 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 	e.m.Lock()
 	defer e.m.Unlock()
 
-	log := slog.With("endpoint", e.GetName())
+	log := slog.With("provider", e.ProviderName, "endpoint", e.Name)
 
 	if e.online == online {
 		if !online {
 			e.attempt++
 
 			// Simple backoff
-			e.retryAt = time.Now().Add(time.Duration(e.attempt) * time.Second)
+			if e.retryAt.IsZero() {
+				e.retryAt = time.Now()
+			}
+
+			backoff := e.attempt
+			if backoff > 12 {
+				backoff = 12
+			}
+
+			e.retryAt = e.retryAt.Add(time.Duration(backoff) * 10 * time.Second)
 
 			diff := time.Until(e.retryAt)
-			log.Info("endpoint still offline", "error", err, "retry_in", diff)
+			log.Info("endpoint still offline", "error", err, "attempt", e.attempt, "retry_in", diff.String())
 		}
 		return
 	}
@@ -70,7 +75,7 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 	if !online {
 		e.retryAt = time.Now().Add(30 * time.Second)
 		diff := time.Until(e.retryAt)
-		log.Info("endpoint offline", "error", err, "retry_in", diff)
+		log.Info("endpoint offline", "error", err, "retry_in", diff.String())
 	} else {
 		log.Info("endpoint online", "client_version", e.clientVersion)
 		e.retryAt = time.Time{}
@@ -105,17 +110,27 @@ func (e *Endpoint) IsOnline() bool {
 	return e.online
 }
 
-func (e *Endpoint) RateLimit() {
-
+func (e *Endpoint) IsRateLimited() bool {
+	return !e.retryAt.IsZero() && time.Since(e.retryAt) < 0
 }
+
+// func (p *Provider) DelayedHealthcheck(p *Provider, delay time.Duration) error {
+// 	t := time.NewTicker(delay)
+// 	defer t.Stop()
+
+// 	<-t.C
+
+// 	return e.Healthcheck(p)
+// }
 
 func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
 	// TODO move to healthcheck loop
-	if !e.retryAt.IsZero() && time.Since(e.retryAt) < 0 {
+	if e.IsRateLimited() {
 		return fmt.Errorf("retrying in %s", time.Until(e.retryAt))
 	}
 
 	err := e.Healthcheck(p)
+
 	if err != nil {
 		e.SetStatus(false, err)
 		return err
@@ -142,9 +157,6 @@ type Provider struct {
 	requestCount       int
 	failedRequestCount int
 	openConnections    int
-
-	ActiveMu sync.RWMutex
-	Active   map[string]*WebSocketProxy
 }
 
 // GetActiveEndpoints returns a list of endpoints that are currently considered online

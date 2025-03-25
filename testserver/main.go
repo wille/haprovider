@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wille/haprovider/internal"
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 var upgrader = websocket.Upgrader{
@@ -18,14 +19,14 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func handleRequest(body []byte) (*internal.RPCResponse, error) {
-	var req internal.RPCRequest
+func handleRequest(body []byte) (*rpc.Response, error) {
+	var req rpc.Request
 	err := json.Unmarshal(body, &req)
 	if err != nil {
 		return nil, err
 	}
 
-	resp := &internal.RPCResponse{
+	resp := &rpc.Response{
 		Version: "2.0",
 		ID:      req.ID,
 	}
@@ -37,9 +38,9 @@ func handleRequest(body []byte) (*internal.RPCResponse, error) {
 	case "eth_chainId":
 		resp.Result = "0x1"
 		return resp, nil
-	// case "eth_blockNumber":
-	// 	resp.Result = "0x1"
-	// 	return resp, nil
+	case "eth_blockNumber":
+		resp.Result = "0x1"
+		return resp, nil
 	case "ha_ratelimit":
 		resp.Error = map[string]any{
 			"code":    -32005,
@@ -67,7 +68,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		w.Write(internal.SerializeRPCResponse(resp))
+		w.Write(rpc.SerializeResponse(resp))
 
 		return
 	}
@@ -92,10 +93,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			rs, err := handleRequest(msg)
 			if err != nil {
 				fmt.Println("Error handling request:", err)
-				continue
+				return
 			}
 
-			client.Write(internal.SerializeRPCResponse(rs))
+			client.Write(rpc.SerializeResponse(rs))
 		}
 	}
 }

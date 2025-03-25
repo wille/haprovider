@@ -28,7 +28,7 @@ func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *ser
 	endpoints := provider.GetActiveEndpoints()
 
 	for _, endpoint := range endpoints {
-		m := timing.NewMetric(endpoint.GetName()).Start()
+		m := timing.NewMetric(endpoint.Name).Start()
 		pbody, err := SendHTTPRequest(ctx, endpoint, body)
 		m.Stop()
 
@@ -112,7 +112,7 @@ func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, rpcreq *rpc.Req
 func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
 
-	log := slog.With("ip", r.RemoteAddr, "provider", provider.Name)
+	log := slog.With("ip", r.RemoteAddr, "transport", "http", "provider", provider.Name)
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
@@ -150,12 +150,12 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 		return
 	}
 
-	log = log.With("endpoint", endpoint.GetName(), "request_time", time.Since(start))
+	log = log.With("endpoint", endpoint.Name, "request_time", time.Since(start))
 
 	log.Debug("request")
 
 	if !provider.Public {
-		w.Header().Set("X-Provider", endpoint.GetName())
+		w.Header().Set("X-Provider", endpoint.Name)
 	}
 
 	if provider.Xfwd {

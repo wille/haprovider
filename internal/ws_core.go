@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -23,8 +24,6 @@ type Client struct {
 
 	pingcnt int
 
-	pingTimer *time.Ticker
-
 	// When we sent off a ping
 	pingStart time.Time
 
@@ -35,13 +34,12 @@ type Client struct {
 func NewClient(conn *websocket.Conn) *Client {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	client := &Client{
-		ctx:       ctx,
-		cancel:    cancel,
-		Conn:      conn,
-		send:      make(chan []byte, 256),
-		recv:      make(chan []byte, 256),
-		close:     make(chan []byte, 1),
-		pingTimer: time.NewTicker(pingPeriod),
+		ctx:    ctx,
+		cancel: cancel,
+		Conn:   conn,
+		send:   make(chan []byte, 32),
+		recv:   make(chan []byte, 32),
+		close:  make(chan []byte),
 	}
 
 	go client.readPump()
@@ -55,9 +53,9 @@ func (c *Client) Read() <-chan []byte {
 }
 
 func (c *Client) Write(data []byte) {
-	// Make sure we're never writing to a closed channel
 	select {
 	case <-c.ctx.Done():
+		slog.Debug("write to closed channel", "ip", c.Conn.RemoteAddr())
 		return
 	default:
 	}
@@ -66,34 +64,25 @@ func (c *Client) Write(data []byte) {
 }
 
 // Close will gracefully close the connection with a close message
-func (c *Client) Close(closeCode int, text error) {
-	if c.closed {
-		return
-	}
+func (c *Client) Close(closeCode int, cause error) {
 	c.closed = true
 
-	if text != nil {
-		c.close <- websocket.FormatCloseMessage(closeCode, text.Error())
+	if cause != nil {
+		c.close <- websocket.FormatCloseMessage(closeCode, cause.Error())
 	} else {
 		c.close <- websocket.FormatCloseMessage(closeCode, "")
 	}
 
-	close(c.close)
-
-	// Remember that <-close will ws.Close()
-	c.stop(text)
-
-	// c.pingTimer.Stop()
-
+	c.cancel(cause)
 }
 
-// stop will force stop the connection
-func (c *Client) stop(cause error) {
+// destroy will force destroy the connection
+func (c *Client) destroy(cause error) {
 	c.cancel(cause)
 }
 
 func (c *Client) readPump() {
-	defer close(c.recv)
+	defer c.Conn.Close()
 
 	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error {
@@ -106,7 +95,7 @@ func (c *Client) readPump() {
 		_, message, err := c.Conn.ReadMessage()
 
 		if err != nil {
-			c.stop(err)
+			c.destroy(err)
 			return
 		}
 
@@ -115,7 +104,9 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
-	defer c.pingTimer.Stop()
+	tick := time.NewTicker(pingPeriod)
+	defer tick.Stop()
+	defer c.Conn.Close()
 
 	for {
 		select {
@@ -123,9 +114,8 @@ func (c *Client) writePump() {
 			return
 		case data := <-c.close:
 			c.Conn.WriteMessage(websocket.CloseMessage, data)
-			c.Conn.Close()
 			return
-		case <-c.pingTimer.C:
+		case <-tick.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 
 			pingData := []byte("haprovider/" + strconv.Itoa(c.pingcnt))
@@ -134,20 +124,20 @@ func (c *Client) writePump() {
 
 			err := c.Conn.WriteMessage(websocket.PingMessage, pingData)
 			if err != nil {
-				c.stop(fmt.Errorf("write: %s", err))
+				c.destroy(fmt.Errorf("write: %s", err))
 				return
 			}
 
 		case message, ok := <-c.send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.stop(fmt.Errorf("write: channel closed"))
+				c.destroy(fmt.Errorf("write: channel closed"))
 				return
 			}
 
 			err := c.Conn.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
-				c.stop(fmt.Errorf("write: %s", err))
+				c.destroy(fmt.Errorf("write: %s", err))
 				return
 			}
 
@@ -155,7 +145,7 @@ func (c *Client) writePump() {
 			for i := 0; i < len(c.send); i++ {
 				err := c.Conn.WriteMessage(websocket.TextMessage, <-c.send)
 				if err != nil {
-					c.stop(fmt.Errorf("write: %s", err))
+					c.destroy(fmt.Errorf("write: %s", err))
 					return
 				}
 			}

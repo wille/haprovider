@@ -149,7 +149,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			providerClient.Write(rpc.SerializeRequest(req))
 		case message := <-providerClient.Read():
 			if strings.Contains(string(message), "error") {
-				slog.Warn("error", "msg", string(message), "endpoint", proxy.endpoint.GetName(), "ip", proxy.ClientConn.Conn.RemoteAddr())
+				slog.Warn("error", "msg", string(message), "endpoint", proxy.endpoint.Name, "ip", proxy.ClientConn.Conn.RemoteAddr())
 			}
 
 			rpcResponse, err := rpc.DecodeResponse(message)
@@ -252,7 +252,7 @@ func (proxy *WebSocketProxy) DialAnyProvider(provider *Provider, timing *servert
 			continue
 		}
 
-		m := timing.NewMetric(endpoint.GetName()).Start()
+		m := timing.NewMetric(endpoint.Name).Start()
 		err := proxy.DialProvider(provider, endpoint)
 		m.Stop()
 
@@ -289,7 +289,7 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 
 	proxy := &WebSocketProxy{
 		ID:            GetRequestID(r),
-		log:           slog.With("ip", r.RemoteAddr, "provider", provider.Name),
+		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "provider", provider.Name),
 		ctx:           ctx,
 		cancel:        cancel,
 		provider:      provider,
@@ -297,15 +297,6 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 		Requests:      make(chan *rpc.Request, 32),
 		subscriptions: make(map[string]chan *rpc.Response),
 	}
-
-	// provider.ActiveMu.Lock()
-	// provider.Active[r.RemoteAddr] = proxy
-	// provider.ActiveMu.Unlock()
-	// defer func() {
-	// 	provider.ActiveMu.Lock()
-	// 	delete(provider.Active, r.RemoteAddr)
-	// 	provider.ActiveMu.Unlock()
-	// }()
 
 	// Dial any provider before upgrading the websocket
 	endpoint, err := proxy.DialAnyProvider(provider, timing)
@@ -329,7 +320,7 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 	}
 
 	if !provider.Public {
-		w.Header().Set("X-Provider", endpoint.GetName())
+		w.Header().Set("X-Provider", endpoint.Name)
 	}
 
 	if provider.Xfwd {
@@ -347,7 +338,7 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
-	proxy.log = proxy.log.With("endpoint", endpoint.GetName())
+	proxy.log = proxy.log.With("endpoint", endpoint.Name)
 	proxy.log.Info("ws open", "client_version", endpoint.clientVersion, "request_time", time.Since(start))
 
 	interrupt := make(chan os.Signal, 1)
