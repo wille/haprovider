@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
 
 	"github.com/wille/haprovider/internal/rpc"
@@ -28,14 +29,18 @@ var (
 )
 
 func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error {
-	clientVersion, err := read(ctx, rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}), true)
+	clientVersion, err := read(ctx, rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}), false)
 	if err != nil {
 		return err
 	}
 
 	// If the 'web3' api is not enabled on the node, the clientVersion will be an empty string
-	if _, ok := clientVersion.Result.(string); ok {
-		e.clientVersion = clientVersion.Result.(string)
+	if version, ok := clientVersion.Result.(string); ok {
+		if e.clientVersion != "" && e.clientVersion != version {
+			slog.Info("clientVersion changed", "old", e.clientVersion, "new", version)
+		}
+
+		e.clientVersion = version
 	}
 
 	res, err := read(ctx, rpc.NewRequest("ha_chainId", "eth_chainId", nil), true)
@@ -72,7 +77,12 @@ func SolanaHealthcheck(ctx context.Context, provider *Provider, endpoint *Endpoi
 	}
 
 	if r, ok := res.Result.(map[string]any); ok {
-		endpoint.clientVersion = r["solana-core"].(string)
+		if version, ok := r["solana-core"].(string); ok {
+			if endpoint.clientVersion != "" && endpoint.clientVersion != version {
+				slog.Info("clientVersion changed", "old", endpoint.clientVersion, "new", version)
+			}
+			endpoint.clientVersion = version
+		}
 	}
 
 	res, err = read(ctx, rpc.NewRequest("ha_health", "getHealth", nil), true)

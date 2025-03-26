@@ -7,7 +7,7 @@ import (
 	yaml "gopkg.in/yaml.v2"
 )
 
-const DefaultRateLimitBackoff = time.Duration(5) * time.Second
+const DefaultRateLimitBackoff = time.Duration(30) * time.Second
 
 const (
 	KindEth = "eth"

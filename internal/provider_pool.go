@@ -43,6 +43,14 @@ func (e *Endpoint) GetTimeout() time.Duration {
 	return 10 * time.Second
 }
 
+func backoff(attempt int) time.Duration {
+	backoff := attempt
+	if backoff > 12 {
+		backoff = 12
+	}
+	return time.Duration(backoff) * 10 * time.Second
+}
+
 func (e *Endpoint) SetStatus(online bool, err error) {
 	e.m.Lock()
 	defer e.m.Unlock()
@@ -58,12 +66,7 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 				e.retryAt = time.Now()
 			}
 
-			backoff := e.attempt
-			if backoff > 12 {
-				backoff = 12
-			}
-
-			e.retryAt = e.retryAt.Add(time.Duration(backoff) * 10 * time.Second)
+			e.retryAt = e.retryAt.Add(backoff(e.attempt))
 
 			diff := time.Until(e.retryAt)
 			log.Info("endpoint still offline", "error", err, "attempt", e.attempt, "retry_in", diff.String())
@@ -73,7 +76,7 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 
 	e.online = online
 	if !online {
-		e.retryAt = time.Now().Add(30 * time.Second)
+		e.retryAt = time.Now().Add(backoff(1))
 		diff := time.Until(e.retryAt)
 		log.Info("endpoint offline", "error", err, "retry_in", diff.String())
 	} else {
@@ -86,12 +89,14 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 // HandleTooManyRequests handles a 429 response and stops using the provider until it's ready again.
 func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
 	var retryAfter time.Duration
+	receivedDuration := false
 
 	if req != nil {
 		header := req.Header.Get("Retry-After")
 
 		if sec, err := strconv.Atoi(header); err != nil && sec > 0 {
 			retryAfter = time.Duration(sec) * time.Second
+			receivedDuration = true
 		} else {
 			retryAfter = DefaultRateLimitBackoff
 		}
@@ -103,7 +108,11 @@ func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
 
 	e.retryAt = time.Now().Add(retryAfter)
 
-	return fmt.Errorf("rate limited for %f", retryAfter.Seconds())
+	if receivedDuration {
+		return fmt.Errorf("rate limited for %s", retryAfter)
+	}
+
+	return fmt.Errorf("rate limited")
 }
 
 func (e *Endpoint) IsOnline() bool {
@@ -179,8 +188,17 @@ func (e *Endpoint) Healthcheck(p *Provider) error {
 	ctx := context.TODO()
 
 	fn := func(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
-		// TODO errRpcError
-		return SendHTTPRPCRequest(ctx, e, req)
+		res, err := SendHTTPRPCRequest(ctx, e, req)
+		if err != nil {
+			return nil, err
+		}
+
+		if errRpcError && res.IsError() {
+			_, err := res.GetError()
+			return nil, err
+		}
+
+		return res, nil
 	}
 
 	switch p.Kind {
