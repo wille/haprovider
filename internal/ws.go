@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -148,10 +147,6 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 		case req := <-proxy.Requests:
 			providerClient.Write(rpc.SerializeRequest(req))
 		case message := <-providerClient.Read():
-			if strings.Contains(string(message), "error") {
-				slog.Warn("error", "msg", string(message), "endpoint", proxy.endpoint.Name, "ip", proxy.ClientConn.Conn.RemoteAddr())
-			}
-
 			rpcResponse, err := rpc.DecodeResponse(message)
 			if err != nil {
 				err := fmt.Errorf("received bad data from provider: %s, msg: %s", err, rpc.FormatRawBody(string(message)))
@@ -189,7 +184,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 					proxy.provider.failedRequestCount++
 					return
 				} else {
-					proxy.log.Debug("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
+					proxy.log.Warn("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
 				}
 			}
 
