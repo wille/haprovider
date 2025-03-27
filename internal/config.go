@@ -9,14 +9,8 @@ import (
 
 const DefaultRateLimitBackoff = time.Duration(30) * time.Second
 
-const (
-	KindEth = "eth"
-	KindBtc = "btc"
-	KindSol = "solana"
-)
-
 type Config struct {
-	Providers map[string]*Provider `yaml:"providers"`
+	Endpoints map[string]*Endpoint `yaml:"endpoints"`
 }
 
 func LoadConfig(configFile string) *Config {

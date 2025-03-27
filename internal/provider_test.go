@@ -22,10 +22,10 @@ func TestInvalidChainID(t *testing.T) {
 	defer server.Close()
 
 	// Create a provider expecting chainID 1
-	provider := &Provider{
+	provider := &Endpoint{
 		ChainID: 1,
 		Kind:    "eth",
-		Endpoint: []*Endpoint{
+		Providers: []*Provider{
 			{
 				Name: "test-invalid-chain",
 				Http: server.URL,
@@ -34,15 +34,15 @@ func TestInvalidChainID(t *testing.T) {
 	}
 
 	// Initialize the endpoint status
-	err := provider.HTTPHealthcheck(provider.Endpoint[0])
+	err := provider.HTTPHealthcheck(provider.Providers[0])
 
 	// Verify the endpoint was marked as offline due to chainID mismatch
 	assert.Error(t, err)
-	assert.False(t, provider.Endpoint[0].online)
+	assert.False(t, provider.Providers[0].online)
 	assert.Contains(t, err.Error(), "chainId mismatch")
 
 	// Verify no active endpoints are returned
-	active := provider.GetActiveEndpoints()
+	active := provider.GetActiveProviders()
 	assert.Empty(t, active)
 }
 
@@ -58,9 +58,9 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 	defer server.Close()
 
 	// Create a provider to test GetActiveEndpoints
-	provider := &Provider{
+	provider := &Endpoint{
 		ChainID: 1,
-		Endpoint: []*Endpoint{{
+		Providers: []*Provider{{
 			Name:         "test-rate-limit",
 			ProviderName: "test-provider",
 			Http:         server.URL,
@@ -76,12 +76,12 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 	assert.Contains(t, err.Error(), ErrNoProvidersAvailable.Error())
 
 	// Verify retry time is in the future (between now and now+10s)
-	assert.False(t, provider.Endpoint[0].retryAt.IsZero())
-	assert.True(t, provider.Endpoint[0].retryAt.After(time.Now()))
-	assert.True(t, provider.Endpoint[0].retryAt.Before(time.Now().Add(30*time.Second)))
+	assert.False(t, provider.Providers[0].retryAt.IsZero())
+	assert.True(t, provider.Providers[0].retryAt.After(time.Now()))
+	assert.True(t, provider.Providers[0].retryAt.Before(time.Now().Add(30*time.Second)))
 
 	// Verify endpoint is not returned as active during rate limiting
-	active := provider.GetActiveEndpoints()
+	active := provider.GetActiveProviders()
 	assert.Empty(t, active)
 }
 
@@ -104,10 +104,10 @@ func TestSlowProvider(t *testing.T) {
 	defer fastServer.Close()
 
 	// Create a provider with both slow and fast endpoints
-	provider := &Provider{
+	provider := &Endpoint{
 		ChainID: 1,
 		Kind:    "eth",
-		Endpoint: []*Endpoint{
+		Providers: []*Provider{
 			{
 				Name:    "slow-provider",
 				Http:    server.URL,
@@ -131,7 +131,7 @@ func TestSlowProvider(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, "fast-provider", endpoint.Name)
-	assert.False(t, provider.Endpoint[0].online)
+	assert.False(t, provider.Providers[0].online)
 }
 
 // TestNonRespondingProvider tests connecting to a provider that is not responding
@@ -146,10 +146,10 @@ func TestNonRespondingProvider(t *testing.T) {
 	}))
 	defer workingServer.Close()
 
-	provider := &Provider{
+	provider := &Endpoint{
 		ChainID: 1,
 		Kind:    "eth",
-		Endpoint: []*Endpoint{
+		Providers: []*Provider{
 			{
 				Name:   "non-responding-provider",
 				Http:   nonRespondingURL,
@@ -173,7 +173,7 @@ func TestNonRespondingProvider(t *testing.T) {
 	assert.Equal(t, "working-provider", endpoint.Name)
 
 	// Verify the non-responding provider was marked as offline
-	assert.False(t, provider.Endpoint[0].online)
+	assert.False(t, provider.Providers[0].online)
 }
 
 // Helper function to run all tests as a group

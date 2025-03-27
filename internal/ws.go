@@ -37,11 +37,8 @@ type WebSocketProxy struct {
 
 	log *slog.Logger
 
-	provider *Provider
 	endpoint *Endpoint
-
-	// The ID of the proxy
-	ID string
+	provider *Provider
 
 	// ClientConn is the incoming client connection
 	ClientConn *Client
@@ -85,7 +82,7 @@ func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *rpc.Request, errRp
 }
 
 func (r *WebSocketProxy) Healthcheck() error {
-	return r.endpoint.Healthcheck(r.provider)
+	return r.provider.Healthcheck(r.endpoint)
 }
 
 // Close destroys the proxy connection.
@@ -94,18 +91,18 @@ func (p *WebSocketProxy) Close(reason error) {
 	p.cancel(reason)
 }
 
-func (proxy *WebSocketProxy) DialProvider(provider *Provider, endpoint *Endpoint) error {
-	u, _ := url.Parse(endpoint.Ws)
+func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider) error {
+	u, _ := url.Parse(provider.Ws)
 
 	headers := http.Header{}
 	headers.Set("User-Agent", "haprovider/"+Version)
 
-	ctx, cancel := context.WithTimeout(proxy.ctx, endpoint.GetTimeout())
+	ctx, cancel := context.WithTimeout(proxy.ctx, provider.GetTimeout())
 	defer cancel()
 
 	var dialer = &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  endpoint.GetTimeout(),
+		HandshakeTimeout:  provider.GetTimeout(),
 		EnableCompression: true,
 	}
 	ws, resp, err := dialer.DialContext(ctx, u.String(), headers)
@@ -118,7 +115,7 @@ func (proxy *WebSocketProxy) DialProvider(provider *Provider, endpoint *Endpoint
 		break
 	case http.StatusTooManyRequests: // Some providers might send a 429 on the websocket connection attempt
 		ws.Close()
-		return endpoint.HandleTooManyRequests(resp)
+		return provider.HandleTooManyRequests(resp)
 	default:
 		ws.Close()
 		return fmt.Errorf("status code %d", resp.StatusCode)
@@ -127,7 +124,7 @@ func (proxy *WebSocketProxy) DialProvider(provider *Provider, endpoint *Endpoint
 	providerClient := NewClient(ws)
 
 	proxy.ProviderConn = providerClient
-	proxy.endpoint = endpoint
+	proxy.provider = provider
 
 	go proxy.pumpProvider(proxy.ProviderConn)
 
@@ -153,11 +150,9 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				proxy.Close(err)
 				proxy.ProviderConn.Close(websocket.CloseUnsupportedData, nil)
 				proxy.ClientConn.Close(websocket.CloseUnsupportedData, err)
-				proxy.provider.failedRequestCount++
+				proxy.endpoint.failedRequestCount++
 				return
 			}
-
-			proxy.provider.requestCount++
 
 			id := rpc.GetRequestIDString(rpcResponse.ID)
 			// Intercept
@@ -169,10 +164,12 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			if rpcResponse.IsError() {
 				errorCode, errorMessage := rpcResponse.GetError()
 
+				proxy.endpoint.failedRequestCount++
+
 				if errorCode == RateLimited {
 					// Set the provider as offline
-					err = proxy.endpoint.HandleTooManyRequests(nil)
-					proxy.endpoint.SetStatus(false, err)
+					err = proxy.provider.HandleTooManyRequests(nil)
+					proxy.provider.SetStatus(false, err)
 
 					// Forward the error to the client
 					proxy.Responses <- rpcResponse
@@ -181,7 +178,6 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 					proxy.Close(err)
 					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 					proxy.ClientConn.Close(websocket.CloseTryAgainLater, err)
-					proxy.provider.failedRequestCount++
 					return
 				} else {
 					proxy.log.Warn("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
@@ -223,6 +219,7 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			// Reset the bad request counter
 			proxy.badRequests = 0
+			proxy.endpoint.requestCount++
 
 			proxy.Requests <- req
 
@@ -235,14 +232,13 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			}
 			ss := rpc.SerializeResponse(rpcResponse)
 			proxy.ClientConn.Write(ss)
-
 		}
 	}
 }
 
 // DialAnyProvider dials any provider and returns a WebSocketProxy
-func (proxy *WebSocketProxy) DialAnyProvider(provider *Provider, timing *servertiming.Header) (*Endpoint, error) {
-	for _, endpoint := range provider.GetActiveEndpoints() {
+func (proxy *WebSocketProxy) DialAnyProvider(provider *Endpoint, timing *servertiming.Header) (*Provider, error) {
+	for _, endpoint := range provider.GetActiveProviders() {
 		if endpoint.Ws == "" {
 			continue
 		}
@@ -277,24 +273,27 @@ func (proxy *WebSocketProxy) DialAnyProvider(provider *Provider, timing *servert
 	return nil, ErrNoProvidersAvailable
 }
 
-func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
 
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		ID:            GetRequestID(r),
-		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "provider", provider.Name),
+		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "provider", endpoint.Name),
 		ctx:           ctx,
 		cancel:        cancel,
-		provider:      provider,
+		endpoint:      endpoint,
 		Responses:     make(chan *rpc.Response, 32),
 		Requests:      make(chan *rpc.Request, 32),
 		subscriptions: make(map[string]chan *rpc.Response),
 	}
 
+	defer func() {
+		proxy.endpoint.openConnections--
+	}()
+
 	// Dial any provider before upgrading the websocket
-	endpoint, err := proxy.DialAnyProvider(provider, timing)
+	provider, err := proxy.DialAnyProvider(endpoint, timing)
 
 	if err == ErrNoProvidersAvailable {
 		proxy.log.Error("no providers available")
@@ -314,12 +313,12 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 		return
 	}
 
-	if !provider.Public {
-		w.Header().Set("X-Provider", endpoint.Name)
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
 	}
 
-	if provider.Xfwd {
-		AddXfwdHeaders(r, w)
+	if endpoint.AddXForwardedHeaders {
+		addXfwdHeaders(r, w)
 	}
 
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -333,8 +332,10 @@ func IncomingWebsocketHandler(ctx context.Context, provider *Provider, w http.Re
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
-	proxy.log = proxy.log.With("endpoint", endpoint.Name)
-	proxy.log.Info("ws open", "client_version", endpoint.clientVersion, "request_time", time.Since(start))
+	proxy.log = proxy.log.With("endpoint", provider.Name)
+	proxy.log.Info("ws open", "client_version", provider.clientVersion, "request_time", time.Since(start))
+
+	proxy.endpoint.totalConnections++
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)

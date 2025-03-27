@@ -26,21 +26,21 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 
 	id := r.PathValue("id")
 
-	provider := config.Providers[id]
+	endpoint := config.Endpoints[id]
 
 	w.Header().Set("Server", "haprovider/"+Version)
 
-	if provider == nil {
+	if endpoint == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	if r.Header.Get("Upgrade") == "websocket" {
-		IncomingWebsocketHandler(ctx, provider, w, r, timing)
+		IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
 		return
 	}
 
-	IncomingHttpHandler(ctx, provider, w, r, timing)
+	IncomingHttpHandler(ctx, endpoint, w, r, timing)
 }
 
 var config *Config
@@ -80,32 +80,38 @@ func main() {
 
 	http.Handle("/{id}", timingMiddleware)
 
-	for providerName, provider := range config.Providers {
-		switch provider.Kind {
+	for endpointName, endpoint := range config.Endpoints {
+		switch endpoint.Kind {
 		case "", "eth":
-			provider.Kind = "eth"
+			endpoint.Kind = "eth"
 		case "solana", "btc":
 		default:
-			log.Fatalf("Unknown provider kind %s", provider.Kind)
+			log.Fatalf("Unknown endpoint kind %s", endpoint.Kind)
 		}
 
-		provider.Name = providerName
+		if endpoint.Name == "" {
+			endpoint.Name = endpointName
+		}
 
-		for _, endpoint := range provider.Endpoint {
-			endpoint.ProviderName = providerName
-			if endpoint.Ws != "" {
-				url, err := url.Parse(endpoint.Ws)
+		for _, provider := range endpoint.Providers {
+			provider.ProviderName = endpointName
+			if provider.Ws != "" {
+				url, err := url.Parse(provider.Ws)
 
 				if err != nil || url.Scheme == "http" || url.Scheme == "https" {
-					log.Fatalf("Invalid Websocket URL: %s", endpoint.Ws)
+					log.Fatalf("Invalid Websocket URL: %s", provider.Ws)
 				}
 			}
-			if endpoint.Http != "" {
-				url, err := url.Parse(endpoint.Http)
+			if provider.Http != "" {
+				url, err := url.Parse(provider.Http)
 
 				if err != nil || url.Scheme == "ws" || url.Scheme == "wss" {
-					log.Fatalf("Invalid HTTP URL: %s", endpoint.Http)
+					log.Fatalf("Invalid HTTP URL: %s", provider.Http)
 				}
+			}
+
+			if provider.Http == "" && provider.Ws == "" {
+				log.Fatalf("Provider %s has no HTTP or WS endpoint", endpointName)
 			}
 		}
 	}
@@ -117,16 +123,16 @@ func main() {
 	total := 0
 	online := 0
 
-	for name, provider := range config.Providers {
-		for _, endpoint := range provider.Endpoint {
-			if endpoint.Http != "" {
-				slog.Info("connecting to", "provider", name, "endpoint", endpoint.Name, "http", endpoint.Http)
+	for name, endpoint := range config.Endpoints {
+		for _, provider := range endpoint.Providers {
+			if provider.Http != "" {
+				slog.Info("connecting to", "provider", name, "endpoint", provider.Name, "http", provider.Http)
 
 				wg.Add(1)
 				go func() {
 					total++
 
-					err := provider.HTTPHealthcheck(endpoint)
+					err := endpoint.HTTPHealthcheck(provider)
 
 					if err == nil {
 						online++
@@ -136,13 +142,13 @@ func main() {
 
 					c := time.NewTicker(DefaultHealthcheckInterval)
 					for range c.C {
-						provider.HTTPHealthcheck(endpoint)
+						endpoint.HTTPHealthcheck(provider)
 					}
 				}()
-			} else if endpoint.Ws != "" {
+			} else if provider.Ws != "" {
 				// No initial healthcheck on websocket-only providers yet
-				slog.Warn("no http endpoint for provider. skipping healthcheck", "provider", name, "endpoint", endpoint.Name)
-				endpoint.SetStatus(true, nil)
+				slog.Warn("no http endpoint for provider. skipping healthcheck", "provider", name, "endpoint", provider.Name)
+				provider.SetStatus(true, nil)
 			}
 		}
 	}

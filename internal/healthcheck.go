@@ -21,14 +21,14 @@ var ErrorCodeText = map[int]string{
 	RateLimited: "rate limited",
 }
 
-type Healthcheck func(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error
+type Healthcheck func(ctx context.Context, p *Endpoint, e *Provider, read rpc.ReaderFunc) error
 
 var (
 	_ Healthcheck = EthereumHealthCheck
 	_ Healthcheck = SolanaHealthcheck
 )
 
-func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read rpc.ReaderFunc) error {
+func EthereumHealthCheck(ctx context.Context, p *Endpoint, e *Provider, read rpc.ReaderFunc) error {
 	clientVersion, err := read(ctx, rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}), false)
 	if err != nil {
 		return err
@@ -70,7 +70,7 @@ func EthereumHealthCheck(ctx context.Context, p *Provider, e *Endpoint, read rpc
 	return nil
 }
 
-func SolanaHealthcheck(ctx context.Context, provider *Provider, endpoint *Endpoint, read rpc.ReaderFunc) error {
+func SolanaHealthcheck(ctx context.Context, provider *Endpoint, endpoint *Provider, read rpc.ReaderFunc) error {
 	res, err := read(ctx, rpc.NewRequest("ha_version", "getVersion", nil), true)
 	if err != nil {
 		return err

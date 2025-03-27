@@ -24,12 +24,12 @@ var defaultClient = &http.Client{
 	},
 }
 
-func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *servertiming.Header) ([]byte, *Endpoint, error) {
-	endpoints := provider.GetActiveEndpoints()
+func ProxyHTTP(ctx context.Context, endpoint *Endpoint, body []byte, timing *servertiming.Header) ([]byte, *Provider, error) {
+	providers := endpoint.GetActiveProviders()
 
-	for _, endpoint := range endpoints {
-		m := timing.NewMetric(endpoint.Name).Start()
-		pbody, err := SendHTTPRequest(ctx, endpoint, body)
+	for _, provider := range providers {
+		m := timing.NewMetric(provider.Name).Start()
+		pbody, err := SendHTTPRequest(ctx, provider, body)
 		m.Stop()
 
 		// In case the request was closed before the provider connection was established
@@ -41,23 +41,24 @@ func ProxyHTTP(ctx context.Context, provider *Provider, body []byte, timing *ser
 		}
 
 		if err != nil {
-			endpoint.SetStatus(false, err)
-			provider.failedRequestCount++
+			provider.SetStatus(false, err)
+			endpoint.failedRequestCount++
 			continue
 		}
 
-		endpoint.SetStatus(true, nil)
-		provider.requestCount++
-		return pbody, endpoint, nil
+		provider.SetStatus(true, nil)
+		endpoint.requestCount++
+		endpoint.totalConnections++
+		return pbody, provider, nil
 	}
 
 	return nil, nil, ErrNoProvidersAvailable
 }
 
-func SendHTTPRequest(ctx context.Context, endpoint *Endpoint, body []byte) ([]byte, error) {
-	url, _ := url.Parse(endpoint.Http)
+func SendHTTPRequest(ctx context.Context, provider *Provider, body []byte) ([]byte, error) {
+	url, _ := url.Parse(provider.Http)
 
-	ctx, cancel := context.WithTimeout(ctx, endpoint.GetTimeout())
+	ctx, cancel := context.WithTimeout(ctx, provider.GetTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url.String(), bytes.NewReader(body))
@@ -85,7 +86,7 @@ func SendHTTPRequest(ctx context.Context, endpoint *Endpoint, body []byte) ([]by
 	case http.StatusOK:
 		break
 	case http.StatusTooManyRequests:
-		return nil, endpoint.HandleTooManyRequests(resp)
+		return nil, provider.HandleTooManyRequests(resp)
 	default:
 		return nil, fmt.Errorf("status code %d, %s", resp.StatusCode, rpc.FormatRawBody(string(b)))
 	}
@@ -93,10 +94,10 @@ func SendHTTPRequest(ctx context.Context, endpoint *Endpoint, body []byte) ([]by
 	return b, nil
 }
 
-func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, rpcreq *rpc.Request) (*rpc.Response, error) {
+func SendHTTPRPCRequest(ctx context.Context, p *Provider, rpcreq *rpc.Request) (*rpc.Response, error) {
 	req := rpc.SerializeRequest(rpcreq)
 
-	b, err := SendHTTPRequest(ctx, endpoint, req)
+	b, err := SendHTTPRequest(ctx, p, req)
 	if err != nil {
 		return nil, err
 	}
@@ -109,10 +110,10 @@ func SendHTTPRPCRequest(ctx context.Context, endpoint *Endpoint, rpcreq *rpc.Req
 	return response, nil
 }
 
-func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
 
-	log := slog.With("ip", r.RemoteAddr, "transport", "http", "provider", provider.Name)
+	log := slog.With("ip", r.RemoteAddr, "transport", "http", "provider", endpoint.Name)
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
@@ -136,7 +137,7 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 
 	log = log.With("rpc_id", rpc.GetRequestIDString(rpcReq.ID), "method", rpcReq.Method)
 
-	pbody, endpoint, err := ProxyHTTP(ctx, provider, body, timing)
+	pbody, provider, err := ProxyHTTP(ctx, endpoint, body, timing)
 
 	if err == ErrNoProvidersAvailable {
 		log.Error("no providers available")
@@ -150,16 +151,16 @@ func IncomingHttpHandler(ctx context.Context, provider *Provider, w http.Respons
 		return
 	}
 
-	log = log.With("endpoint", endpoint.Name, "request_time", time.Since(start))
+	log = log.With("provider", provider.Name, "request_time", time.Since(start))
 
 	log.Debug("request")
 
-	if !provider.Public {
-		w.Header().Set("X-Provider", endpoint.Name)
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
 	}
 
-	if provider.Xfwd {
-		AddXfwdHeaders(r, w)
+	if endpoint.AddXForwardedHeaders {
+		addXfwdHeaders(r, w)
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

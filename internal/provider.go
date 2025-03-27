@@ -14,12 +14,10 @@ import (
 )
 
 var (
-	ErrNoProvidersAvailable    = errors.New("no providers available")
-	ErrNoProvidersForWebsocket = errors.New("no providers available for websocket connections")
-	ErrNoProvidersForHTTP      = errors.New("no providers available for http connections")
+	ErrNoProvidersAvailable = errors.New("no providers available")
 )
 
-type Endpoint struct {
+type Provider struct {
 	ProviderName string
 	Name         string `yaml:"name"`
 	Http         string `yaml:"http"`
@@ -36,7 +34,7 @@ type Endpoint struct {
 	m sync.Mutex
 }
 
-func (e *Endpoint) GetTimeout() time.Duration {
+func (e *Provider) GetTimeout() time.Duration {
 	if e.Timeout > 0 {
 		return e.Timeout
 	}
@@ -51,7 +49,7 @@ func backoff(attempt int) time.Duration {
 	return time.Duration(backoff) * 10 * time.Second
 }
 
-func (e *Endpoint) SetStatus(online bool, err error) {
+func (e *Provider) SetStatus(online bool, err error) {
 	e.m.Lock()
 	defer e.m.Unlock()
 
@@ -87,7 +85,7 @@ func (e *Endpoint) SetStatus(online bool, err error) {
 }
 
 // HandleTooManyRequests handles a 429 response and stops using the provider until it's ready again.
-func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
+func (e *Provider) HandleTooManyRequests(req *http.Response) error {
 	var retryAfter time.Duration
 	receivedDuration := false
 
@@ -115,11 +113,11 @@ func (e *Endpoint) HandleTooManyRequests(req *http.Response) error {
 	return fmt.Errorf("rate limited")
 }
 
-func (e *Endpoint) IsOnline() bool {
+func (e *Provider) IsOnline() bool {
 	return e.online
 }
 
-func (e *Endpoint) IsRateLimited() bool {
+func (e *Provider) IsRateLimited() bool {
 	return !e.retryAt.IsZero() && time.Since(e.retryAt) < 0
 }
 
@@ -132,59 +130,7 @@ func (e *Endpoint) IsRateLimited() bool {
 // 	return e.Healthcheck(p)
 // }
 
-func (p *Provider) HTTPHealthcheck(e *Endpoint) error {
-	// TODO move to healthcheck loop
-	if e.IsRateLimited() {
-		return fmt.Errorf("retrying in %s", time.Until(e.retryAt))
-	}
-
-	err := e.Healthcheck(p)
-
-	if err != nil {
-		e.SetStatus(false, err)
-		return err
-	}
-
-	e.SetStatus(true, nil)
-
-	return nil
-}
-
-type Provider struct {
-	Name     string
-	ChainID  int         `yaml:"chainId"`
-	Kind     string      `yaml:"kind"`
-	Endpoint []*Endpoint `yaml:"endpoints"`
-
-	// Public indicates that the endpoint is public and that we
-	// will skip debug headers and detailed error messages to the client.
-	// TODO
-	Public bool `yaml:"public,omitempty"`
-
-	Xfwd bool `yaml:"xfwd,omitempty"`
-
-	requestCount       int
-	failedRequestCount int
-	openConnections    int
-}
-
-// GetActiveEndpoints returns a list of endpoints that are currently considered online
-func (p *Provider) GetActiveEndpoints() []*Endpoint {
-	var active []*Endpoint
-
-	for _, e := range p.Endpoint {
-
-		if !e.online {
-			continue
-		}
-
-		active = append(active, e)
-	}
-
-	return active
-}
-
-func (e *Endpoint) Healthcheck(p *Provider) error {
+func (e *Provider) Healthcheck(p *Endpoint) error {
 	ctx := context.TODO()
 
 	fn := func(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
