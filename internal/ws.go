@@ -279,7 +279,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "provider", endpoint.Name),
+		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "endpoint", endpoint.Name),
 		ctx:           ctx,
 		cancel:        cancel,
 		endpoint:      endpoint,
@@ -332,7 +332,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
-	proxy.log = proxy.log.With("endpoint", provider.Name)
+	proxy.log = proxy.log.With("provider", provider.Name)
 	proxy.log.Info("ws open", "client_version", provider.clientVersion, "request_time", time.Since(start))
 
 	proxy.endpoint.totalConnections++
