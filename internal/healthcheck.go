@@ -77,12 +77,12 @@ func SolanaHealthcheck(ctx context.Context, endpoint *Endpoint, provider *Provid
 		}
 	}
 
-	res, err = read(ctx, rpc.NewRequest("ha_health", "getHealth", nil), true)
+	_, err = read(ctx, rpc.NewRequest("ha_health", "getHealth", nil), true)
 	if err != nil {
 		return err
 	}
 
-	res, err = read(ctx, rpc.NewRequest("ha_height", "getBlockHeight", nil), true)
+	_, err = read(ctx, rpc.NewRequest("ha_height", "getBlockHeight", nil), true)
 	if err != nil {
 		return err
 	}

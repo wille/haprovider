@@ -14,7 +14,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
-	. "github.com/wille/haprovider/internal"
+	"github.com/wille/haprovider/internal"
 )
 
 // Incoming requests
@@ -28,7 +28,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 
 	endpoint := config.Endpoints[id]
 
-	w.Header().Set("Server", "haprovider/"+Version)
+	w.Header().Set("Server", "haprovider/"+internal.Version)
 
 	if endpoint == nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -36,14 +36,14 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Header.Get("Upgrade") == "websocket" {
-		IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
+		internal.IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
 		return
 	}
 
-	IncomingHttpHandler(ctx, endpoint, w, r, timing)
+	internal.IncomingHttpHandler(ctx, endpoint, w, r, timing)
 }
 
-var config *Config
+var config *internal.Config
 
 func getEnvWithDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -60,7 +60,7 @@ func main() {
 
 	flag.Parse()
 
-	config = LoadConfig(*configFile)
+	config = internal.LoadConfig(*configFile)
 
 	level := slog.LevelInfo
 
@@ -116,7 +116,7 @@ func main() {
 		}
 	}
 
-	slog.Info("starting haprovider", "version", Version)
+	slog.Info("starting haprovider", "version", internal.Version)
 
 	var wg sync.WaitGroup
 
@@ -140,7 +140,7 @@ func main() {
 
 					wg.Done()
 
-					c := time.NewTicker(DefaultHealthcheckInterval)
+					c := time.NewTicker(internal.DefaultHealthcheckInterval)
 					for range c.C {
 						endpoint.HTTPHealthcheck(provider)
 					}
