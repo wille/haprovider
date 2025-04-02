@@ -32,7 +32,12 @@ func (r *Response) GetError() (int, error) {
 }
 
 func SerializeResponse(req *Response) []byte {
-	b, _ := json.Marshal(req)
+	b, err := json.Marshal(req)
+
+	if err != nil {
+		panic(err)
+	}
+
 	return b
 }
 

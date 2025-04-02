@@ -19,7 +19,11 @@ func NewRequest(id string, method string, params any) *Request {
 }
 
 func SerializeRequest(req *Request) []byte {
-	b, _ := json.Marshal(req)
+	b, err := json.Marshal(req)
+	if err != nil {
+		panic(err)
+	}
+
 	return b
 }
 
