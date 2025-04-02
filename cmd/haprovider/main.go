@@ -15,6 +15,7 @@ import (
 
 	servertiming "github.com/mitchellh/go-server-timing"
 	"github.com/wille/haprovider/internal"
+	"github.com/wille/haprovider/internal/metrics"
 )
 
 // Incoming requests
@@ -45,40 +46,83 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 
 var config *internal.Config
 
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
+const (
+	DefaultConfigFile  = "config.yml"
+	DefaultPort        = "127.0.0.1:8080"
+	DefaultLogLevel    = "info"
+	DefaultLogJSON     = false
+	DefaultMetricsPort = "127.0.0.1:9090"
+)
 
 func main() {
-	var addr = flag.String("addr", getEnvWithDefault("HA_ADDR", "0.0.0.0:8080"), "http service address ($HA_ADDR)")
-	var configFile = flag.String("config", getEnvWithDefault("HA_CONFIGFILE", "config.yml"), "config file ($HA_CONFIGFILE) (Raw config can be provided via $HA_CONFIG)")
-	var debug = flag.Bool("debug", getEnvWithDefault("HA_DEBUG", "false") == "true", "debug logging ($HA_DEBUG)")
-	var json = flag.Bool("json", getEnvWithDefault("HA_JSON", "false") == "true", "json logging ($HA_JSON)")
+	var configFile = flag.String("config", DefaultConfigFile, "config file ($HA_CONFIGFILE) (Raw config can be provided via $HA_CONFIG)")
+	var port = flag.String("port", DefaultPort, "http service port ($HA_PORT)")
+	var metricsPort = flag.String("metrics-port", DefaultMetricsPort, "metrics port ($HA_METRICS_PORT)")
+	var logLevel = flag.String("log-level", DefaultLogLevel, "logging level (debug, info, warn, error) ($HA_LOG_LEVEL)")
+	var logJSON = flag.Bool("log-json", DefaultLogJSON, "enable JSON logging ($HA_LOG_JSON)")
 
 	flag.Parse()
 
 	config = internal.LoadConfig(*configFile)
 
-	level := slog.LevelInfo
-
-	if *debug {
-		level = slog.LevelDebug
+	if *logLevel == DefaultLogLevel {
+		env := os.Getenv("HA_LOG_LEVEL")
+		if env != "" {
+			*logLevel = env
+		} else if config.LogLevel != "" {
+			*logLevel = config.LogLevel
+		}
 	}
 
-	if *json {
+	if !*logJSON {
+		env := os.Getenv("HA_LOG_JSON")
+		if env == "true" {
+			*logJSON = true
+		} else if config.LogJSON {
+			*logJSON = true
+		}
+	}
+
+	if *port == DefaultPort {
+		env := os.Getenv("HA_PORT")
+		if env != "" {
+			*port = env
+		} else if config.Port != "" {
+			*port = config.Port
+		}
+	}
+
+	if *metricsPort == DefaultMetricsPort {
+		env := os.Getenv("HA_METRICS_PORT")
+		if env != "" {
+			*metricsPort = env
+		} else if config.MetricsPort != "" {
+			*metricsPort = config.MetricsPort
+		}
+	}
+
+	// Set log level from config if not specified by command line
+	level := slog.LevelInfo
+	if *logLevel != "info" {
+		switch *logLevel {
+		case "debug":
+			level = slog.LevelDebug
+		case "info":
+			level = slog.LevelInfo
+		case "warn":
+			level = slog.LevelWarn
+		case "error":
+			level = slog.LevelError
+		}
+	}
+
+	if *logJSON {
 		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			Level: level,
 		})))
 	} else {
 		slog.SetLogLoggerLevel(level)
 	}
-
-	timingMiddleware := servertiming.Middleware(http.HandlerFunc(requestHandler), nil)
-
-	http.Handle("/{id}", timingMiddleware)
 
 	for endpointName, endpoint := range config.Endpoints {
 		switch endpoint.Kind {
@@ -155,25 +199,51 @@ func main() {
 
 	wg.Wait()
 
-	server := http.Server{
-		Addr: *addr,
+	// Main application server
+	mainMux := http.NewServeMux()
+	timingMiddleware := servertiming.Middleware(http.HandlerFunc(requestHandler), nil)
+	mainMux.Handle("/{id}", timingMiddleware)
+
+	mainServer := &http.Server{
+		Addr:    *port,
+		Handler: mainMux,
 	}
 
-	slog.Info("haprovider started", "addr", *addr, "online", online, "total", total)
+	// Metrics server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metrics.MetricsHandler())
 
-	go server.ListenAndServe()
+	metricsServer := &http.Server{
+		Addr:    *metricsPort,
+		Handler: metricsMux,
+	}
 
+	// Start both servers
+	go func() {
+		slog.Info("starting metrics server", "version", internal.Version, "addr", *metricsPort)
+		if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("metrics server error", "error", err)
+		}
+	}()
+
+	go func() {
+		slog.Info("starting haprovider", "version", internal.Version, "addr", *port)
+		if err := mainServer.ListenAndServe(); err != http.ErrServerClosed {
+			slog.Error("main server error", "error", err)
+		}
+	}()
+
+	// Handle graceful shutdown
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
 	<-interrupt
-
 	slog.Info("shutting down...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	server.Shutdown(ctx)
-
-	slog.Info("shutdown complete")
+	// Shutdown both servers
+	metricsServer.Shutdown(ctx)
+	mainServer.Shutdown(ctx)
 }

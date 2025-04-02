@@ -12,6 +12,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/metrics"
 	"github.com/wille/haprovider/internal/rpc"
 )
 
@@ -24,12 +25,12 @@ var defaultClient = &http.Client{
 	},
 }
 
-func ProxyHTTP(ctx context.Context, endpoint *Endpoint, body []byte, timing *servertiming.Header) ([]byte, *Provider, error) {
+func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.Request, timing *servertiming.Header) (*rpc.Response, *Provider, error) {
 	providers := endpoint.GetActiveProviders()
 
 	for _, provider := range providers {
 		m := timing.NewMetric(provider.Name).Start()
-		pbody, err := SendHTTPRequest(ctx, provider, body)
+		res, err := SendHTTPRPCRequest(ctx, provider, req)
 		m.Stop()
 
 		// In case the request was closed before the provider connection was established
@@ -42,14 +43,12 @@ func ProxyHTTP(ctx context.Context, endpoint *Endpoint, body []byte, timing *ser
 
 		if err != nil {
 			provider.SetStatus(false, err)
-			endpoint.failedRequestCount++
 			continue
 		}
 
 		provider.SetStatus(true, nil)
-		endpoint.requestCount++
-		endpoint.totalConnections++
-		return pbody, provider, nil
+
+		return res, provider, nil
 	}
 
 	return nil, nil, ErrNoProvidersAvailable
@@ -137,15 +136,17 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 
 	log = log.With("rpc_id", rpc.GetRequestIDString(rpcReq.ID), "method", rpcReq.Method)
 
-	pbody, provider, err := ProxyHTTP(ctx, endpoint, body, timing)
-
-	if err == ErrNoProvidersAvailable {
-		log.Error("no providers available")
-		http.Error(w, "no providers available", http.StatusServiceUnavailable)
-		return
-	}
+	res, provider, err := ProxyHTTP(ctx, endpoint, rpcReq, timing)
 
 	if err != nil {
+		metrics.RecordRequest(endpoint.Name, provider.Name, "http", rpcReq.Method, time.Since(start).Seconds(), true)
+
+		if err == ErrNoProvidersAvailable {
+			log.Error("no providers available")
+			http.Error(w, "no providers available", http.StatusServiceUnavailable)
+			return
+		}
+
 		log.Error("error proxying request", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -154,6 +155,8 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 	log = log.With("provider", provider.Name, "request_time", time.Since(start))
 
 	log.Debug("request")
+
+	metrics.RecordRequest(endpoint.Name, provider.Name, "http", rpcReq.Method, time.Since(start).Seconds(), res.IsError())
 
 	if !endpoint.Public {
 		w.Header().Set("X-Provider", provider.Name)
@@ -165,7 +168,7 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	_, err = w.Write(pbody)
+	_, err = w.Write(rpc.SerializeResponse(res))
 	if err != nil {
 		log.Error("error writing body", "error", err)
 		return

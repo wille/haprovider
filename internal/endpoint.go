@@ -24,11 +24,6 @@ type Endpoint struct {
 
 	// AddXForwardedHeaders adds X-Forwarded-For header to requests sent to upstream providers
 	AddXForwardedHeaders bool `yaml:"add_xfwd_headers,omitempty"`
-
-	requestCount       int
-	failedRequestCount int
-	openConnections    int
-	totalConnections   int
 }
 
 // GetActiveProviders returns a list of providers that are currently considered online

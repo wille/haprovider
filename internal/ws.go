@@ -12,6 +12,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/metrics"
 	"github.com/wille/haprovider/internal/rpc"
 
 	"github.com/gorilla/websocket"
@@ -150,9 +151,10 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				proxy.Close(err)
 				proxy.ProviderConn.Close(websocket.CloseUnsupportedData, nil)
 				proxy.ClientConn.Close(websocket.CloseUnsupportedData, err)
-				proxy.endpoint.failedRequestCount++
 				return
 			}
+
+			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", rpcResponse.Method, 0, rpcResponse.IsError())
 
 			id := rpc.GetRequestIDString(rpcResponse.ID)
 			// Intercept
@@ -163,8 +165,6 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 
 			if rpcResponse.IsError() {
 				errorCode, errorMessage := rpcResponse.GetError()
-
-				proxy.endpoint.failedRequestCount++
 
 				if errorCode == RateLimited {
 					// Set the provider as offline
@@ -219,7 +219,6 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			// Reset the bad request counter
 			proxy.badRequests = 0
-			proxy.endpoint.requestCount++
 
 			proxy.Requests <- req
 
@@ -263,8 +262,6 @@ func (proxy *WebSocketProxy) DialAnyProvider(provider *Endpoint, timing *servert
 			continue
 		}
 
-		provider.openConnections++
-
 		endpoint.SetStatus(true, nil)
 
 		return endpoint, nil
@@ -287,10 +284,6 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 		Requests:      make(chan *rpc.Request, 32),
 		subscriptions: make(map[string]chan *rpc.Response),
 	}
-
-	defer func() {
-		proxy.endpoint.openConnections--
-	}()
 
 	// Dial any provider before upgrading the websocket
 	provider, err := proxy.DialAnyProvider(endpoint, timing)
@@ -329,13 +322,16 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 		return
 	}
 
+	defer func() {
+		metrics.RecordCloseConnection(endpoint.Name, provider.Name)
+	}()
+	metrics.RecordOpenConnection(endpoint.Name, provider.Name)
+
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
 	proxy.log = proxy.log.With("provider", provider.Name)
 	proxy.log.Info("ws open", "client_version", provider.clientVersion, "request_time", time.Since(start))
-
-	proxy.endpoint.totalConnections++
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
