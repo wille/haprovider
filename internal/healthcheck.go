@@ -82,13 +82,13 @@ func SolanaHealthcheck(ctx context.Context, endpoint *Endpoint, provider *Provid
 		return err
 	}
 
-	_, err = read(ctx, rpc.NewRequest("ha_height", "getBlockHeight", nil), true)
+	res, err = read(ctx, rpc.NewRequest("ha_height", "getBlockHeight", nil), true)
 	if err != nil {
 		return err
 	}
 
 	if _, ok := res.Result.(float64); !ok {
-		return fmt.Errorf("block height is not a number")
+		return fmt.Errorf("block height is not a number: %v", res.Result)
 	}
 
 	return nil
