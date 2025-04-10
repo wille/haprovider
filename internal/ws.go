@@ -166,13 +166,25 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			if rpcResponse.IsError() {
 				errorCode, errorMessage := rpcResponse.GetError()
 
-				if errorCode == RateLimited {
+				if errorCode == EthErrorRateLimited {
 					// Set the provider as offline
 					err = proxy.provider.HandleTooManyRequests(nil)
 					proxy.provider.SetStatus(false, err)
 
 					// Forward the error to the client
 					proxy.Responses <- rpcResponse
+
+					// Close the connection
+					proxy.Close(err)
+					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+					proxy.ClientConn.Close(websocket.CloseServiceRestart, err)
+					return
+				} else if errorCode == EthErrorInternalError {
+					// Forward the error to the client
+					proxy.Responses <- rpcResponse
+
+					// Set the provider as offline
+					proxy.provider.SetStatus(false, errorMessage)
 
 					// Close the connection
 					proxy.Close(err)

@@ -12,13 +12,12 @@ import (
 const (
 	DefaultHealthcheckInterval = 10 * time.Second
 
-	RateLimited = -32005
-	// -32603	Internal JSON-RPC error	This error is typically due to a bad or invalid payload
-)
+	// Rate limited
+	EthErrorRateLimited = -32005
 
-var ErrorCodeText = map[int]string{
-	RateLimited: "rate limited",
-}
+	// Internal JSON-RPC error
+	EthErrorInternalError = -32603
+)
 
 type Healthcheck func(ctx context.Context, p *Endpoint, e *Provider, read rpc.ReaderFunc) error
 
