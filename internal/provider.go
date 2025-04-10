@@ -26,9 +26,12 @@ type Provider struct {
 	// The timeout for the provider. Use Endpoint.GetTimeout() to get the actual timeout
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 
-	retryAt       time.Time
-	attempt       int
-	online        bool
+	retryAt time.Time
+	attempt int
+
+	online   bool
+	onlineAt time.Time
+
 	clientVersion string
 
 	m sync.Mutex
@@ -75,10 +78,12 @@ func (e *Provider) SetStatus(online bool, err error) {
 	e.online = online
 	if !online {
 		e.retryAt = time.Now().Add(backoff(1))
+		e.onlineAt = time.Time{}
 		diff := time.Until(e.retryAt)
 		log.Info("endpoint offline", "error", err, "retry_in", diff.String())
 	} else {
 		log.Info("endpoint online", "client_version", e.clientVersion)
+		e.onlineAt = time.Now()
 		e.retryAt = time.Time{}
 		e.attempt = 0
 	}

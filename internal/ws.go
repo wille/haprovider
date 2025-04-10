@@ -348,21 +348,37 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
+	t := time.NewTicker(1 * time.Minute)
+
 	for {
 		select {
+		// Check if the primary provider is back online and close the connection so the client can reconnect
+		case <-t.C:
+			primaryProvider := endpoint.Providers[0]
+			// The primary provider has been online for more than 5 minutes
+			if provider != primaryProvider && primaryProvider.online && time.Since(primaryProvider.onlineAt) > 5*time.Minute {
+				proxy.log.Info("primary provider is back online, closing connection")
+				proxy.ClientConn.Close(websocket.CloseServiceRestart, fmt.Errorf("primary provider is back online"))
+				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+				return
+			}
+
+		// Gracefully close the connection both ways
 		case <-interrupt:
-			// Gracefully close the connection both ways
 			proxy.ClientConn.Close(websocket.CloseGoingAway, fmt.Errorf("haprovider shutting down"))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 			return
+
+		// We closed the connection
 		case <-proxy.ctx.Done():
-			// We closed the connection
 			proxy.log.Error("ws closed", "error", context.Cause(proxy.ctx))
 			return
+
 		case <-proxy.ClientConn.ctx.Done():
 			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %w", context.Cause(proxy.ClientConn.ctx)))
 			return
+
 		case <-proxy.ProviderConn.ctx.Done():
 			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx))
 			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %w", context.Cause(proxy.ProviderConn.ctx)))

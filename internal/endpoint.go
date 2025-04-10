@@ -31,7 +31,6 @@ func (p *Endpoint) GetActiveProviders() []*Provider {
 	var active []*Provider
 
 	for _, e := range p.Providers {
-
 		if !e.online {
 			continue
 		}
