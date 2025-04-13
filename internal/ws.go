@@ -96,7 +96,7 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 	u, _ := url.Parse(provider.Ws)
 
 	headers := http.Header{}
-	headers.Set("User-Agent", "haprovider/"+Version)
+	headers.Set("User-Agent", UserAgent)
 
 	ctx, cancel := context.WithTimeout(proxy.ctx, provider.GetTimeout())
 	defer cancel()

@@ -66,7 +66,7 @@ func SendHTTPRequest(ctx context.Context, provider *Provider, body []byte) ([]by
 	}
 
 	req.Header = make(http.Header)
-	req.Header.Set("User-Agent", "haprovider/"+Version)
+	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
 	resp, err := defaultClient.Do(req)
