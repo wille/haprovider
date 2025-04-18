@@ -1,4 +1,4 @@
-FROM golang:1.23 AS builder
+FROM golang:1.24 AS builder
 
 LABEL org.opencontainers.image.source=https://github.com/wille/haprovider
 

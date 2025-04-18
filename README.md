@@ -1,10 +1,17 @@
 # haprovider
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/wille/haprovider)](https://goreportcard.com/report/github.com/wille/haprovider)
-[![GoDoc](https://godoc.org/github.com/wille/haprovider?status.svg)](https://godoc.org/github.com/wille/haprovider)
-[![License](https://img.shields.io/github/license/wille/haprovider)](LICENSE)
+[![Go Report Card](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://img.shields.io/github/v/release/wille/haprovider)
 
-*High Availability Provider* is a load balancer for Ethereum and Solana JSON-RPC nodes, designed to provide reliable and efficient access to blockchain networks.
+*High Availability Provider* is a load balancer for Ethereum and Solana JSON-RPC nodes, designed to provide reliable and 24/7 uninterrupted access to blockchains.
+
+### Reasons for using haprovider
+
+- Zero downtime - RPC providers can and will have trouble providing you uninterrupted 24/7 access. You should have at least two providers powering your access to a chain, like your own node and a service like Infura as a backup.
+
+- You run your own node and you don't want to disrupt your service when you take it down for maintenance/upgrades.
+
+- You don't want to deal with the maintenance and costs of your own nodes for storage intensive Ethereum L2 chains or a local Solana node with high hardware requirements
+
 
 ## Table of Contents
 - [Features](#features)
@@ -25,6 +32,13 @@
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
+
+### *What haprovider doesn't do right now*
+
+- Response caching
+- Transaction broadcasts to multiple nodes
+- Fetching transactions from any node that has the transaction in the mempool
+- Cross checking account balances
 
 ## Installation
 
@@ -54,7 +68,12 @@ endpoints:
 
 2. Start the service:
 ```bash
-$ haprovider --config config.yml
+$ haprovider
+```
+
+Or with command line options:
+```bash
+$ haprovider --config config.yml --log-level debug --log-json
 ```
 
 3. Connect your application:
@@ -72,6 +91,11 @@ const provider = new ethers.WebSocketProvider('ws://localhost:8080/eth');
 The configuration file supports the following options:
 
 ```yml
+# Global settings
+port: 8080
+log_level: info  # debug, info, warn, error
+log_json: false  # Enable JSON logging
+
 # Endpoint configurations
 endpoints:
   ethereum:
@@ -94,17 +118,31 @@ endpoints:
 
 ### Configuration Options
 
-- `port`: HTTP/WS server port (default: 8080) (can be set with $HA_PORT)
-- `log_level`: Logging level (debug, info, warn, error) (can be set with $HA_LOGLEVEL)
-- `log_json`: Enable JSON logs (can be set with $HA_JSON)
+- `port`: HTTP/WS server port (default: 8080)
+- `metrics_tab`: Prometheus port (default: none) 
+- `log_level`: Logging level (debug, info, warn, error)
+- `log_json`: Enable JSON logs
 - `endpoints`: Map of endpoint configurations
-  - `kind`: Provider type (eth, solana)
+  - `kind`: Provider type (eth, solana) (default: solana)
   - `chainId`: Network chain ID (optional, Ethereum only)
   - `providers`: List of provider configurations
     - `name`: Provider identifier
-    - `http`: HTTP endpoint URL
+    - `http`: HTTP endpoint URL (required)
     - `ws`: WebSocket endpoint URL (optional)
     - `timeout`: Request timeout (optional, default 10s)
+    - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false)
+    - `add_xfwd_headers` Add X-Forwarded-For to upstream requests (optional)
+
+### Command Line Options
+
+- `--config`: Path to config file (default: config.yml) ($HA_CONFIG_FILE or raw yml with $HA_CONFIG)
+- `--port`: HTTP/WS server address (default: :8080) ($HA_PORT)
+- `--metrics-port`: Prometheus port (default: none) ($HA_METRICS_PORT)
+- `--log-level`: Logging level (debug, info, warn, error) (default: info) ($HA_LOG_LEVEL)
+- `--log-json`: Enable JSON logging (default: false) ($HA_LOG_JSON)
+
+> [!NOTE]
+> Command line arguments take precedence over configuration file settings. For example, if you specify `--log-level debug` on the command line, it will override the `log_level` setting in the config file.
 
 ## Examples
 
@@ -145,39 +183,14 @@ endpoints:
 haprovider exposes Prometheus metrics for monitoring:
 
 - `haprovider_requests_total`: Total number of requests
+- `haprovider_failed_requests_total`: Failed requests
 - `haprovider_request_duration_seconds`: Request duration histogram
+- `haprovider_open_connections`: Open connections
 - `haprovider_provider_health`: Provider health status
 - `haprovider_provider_errors_total`: Total provider errors
-- `haprovider_rate_limits_total`: Rate limit events
 
-Access metrics at `http://localhost:9090/metrics`
-
-## Troubleshooting
-
-Common issues and solutions:
-
-1. **Connection Timeouts**
-   - Check provider URLs and network connectivity
-   - Adjust timeout settings in configuration
-
-2. **Rate Limiting**
-   - Monitor rate limit metrics
-   - Consider adding more providers or upgrading API tiers
-
-3. **Health Check Failures**
-   - Verify provider endpoints are accessible
-   - Check provider status pages
+Enable metrics with configuration option `metrics_port: 127.0.0.1:8080`
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
