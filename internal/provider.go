@@ -44,8 +44,6 @@ func (e *Provider) GetTimeout() time.Duration {
 	return 10 * time.Second
 }
 
-const highestBackoff = 4 * time.Minute
-
 func nextAttemptDelay(attempt int) time.Duration {
 	switch {
 	case attempt < 5:
