@@ -138,7 +138,7 @@ func main() {
 		}
 
 		for _, provider := range endpoint.Providers {
-			provider.ProviderName = endpointName
+			provider.EndpointName = endpoint.Name
 			if provider.Ws != "" {
 				url, err := url.Parse(provider.Ws)
 

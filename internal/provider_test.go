@@ -63,7 +63,7 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 		ChainID: 1,
 		Providers: []*Provider{{
 			Name:         "test-rate-limit",
-			ProviderName: "test-provider",
+			EndpointName: "test-provider",
 			Http:         server.URL,
 			online:       true, // Start with the endpoint online
 		}},

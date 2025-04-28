@@ -18,7 +18,7 @@ var (
 )
 
 type Provider struct {
-	ProviderName string
+	EndpointName string
 	Name         string `yaml:"name"`
 	Http         string `yaml:"http"`
 	Ws           string `yaml:"ws"`
@@ -44,48 +44,48 @@ func (e *Provider) GetTimeout() time.Duration {
 	return 10 * time.Second
 }
 
-func backoff(attempt int) time.Duration {
-	backoff := attempt
-	if backoff > 12 {
-		backoff = 12
+const highestBackoff = 4 * time.Minute
+
+func nextAttemptDelay(attempt int) time.Duration {
+	switch {
+	case attempt < 5:
+		return 10 * time.Second
+	case attempt < 10:
+		return 30 * time.Second
+	default:
+		return 1 * time.Minute
 	}
-	return time.Duration(backoff) * 10 * time.Second
 }
 
-func (e *Provider) SetStatus(online bool, err error) {
-	e.m.Lock()
-	defer e.m.Unlock()
+func (p *Provider) SetStatus(online bool, err error) {
+	p.m.Lock()
+	defer p.m.Unlock()
 
-	log := slog.With("provider", e.ProviderName, "endpoint", e.Name)
+	log := slog.With("provider", p.EndpointName, "endpoint", p.Name)
 
-	if e.online == online {
+	if p.online == online {
 		if !online {
-			e.attempt++
+			p.attempt++
 
-			// Simple backoff
-			if e.retryAt.IsZero() {
-				e.retryAt = time.Now()
-			}
+			backoff := nextAttemptDelay(p.attempt)
+			p.retryAt = time.Now().Add(backoff)
 
-			e.retryAt = e.retryAt.Add(backoff(e.attempt))
-
-			diff := time.Until(e.retryAt)
-			log.Info("endpoint still offline", "error", err, "attempt", e.attempt, "retry_in", diff.String())
+			log.Info("provider still offline", "error", err, "attempt", p.attempt, "retry_in", backoff.String())
 		}
 		return
 	}
 
-	e.online = online
+	p.online = online
 	if !online {
-		e.retryAt = time.Now().Add(backoff(1))
-		e.onlineAt = time.Time{}
-		diff := time.Until(e.retryAt)
-		log.Info("endpoint offline", "error", err, "retry_in", diff.String())
+		backoff := nextAttemptDelay(1)
+		p.retryAt = time.Now().Add(backoff)
+		p.onlineAt = time.Time{}
+		log.Info("provider offline", "error", err, "attempt", p.attempt, "retry_in", backoff.String())
 	} else {
-		log.Info("endpoint online", "client_version", e.clientVersion)
-		e.onlineAt = time.Now()
-		e.retryAt = time.Time{}
-		e.attempt = 0
+		log.Info("provider online", "client_version", p.clientVersion)
+		p.onlineAt = time.Now()
+		p.retryAt = time.Time{}
+		p.attempt = 0
 	}
 }
 
