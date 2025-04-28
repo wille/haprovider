@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/wille/haprovider/internal/rpc"
@@ -59,6 +60,21 @@ func EthereumHealthCheck(ctx context.Context, p *Endpoint, e *Provider, read rpc
 
 	if _, ok := res.Result.(string); !ok {
 		return fmt.Errorf("block number is not a string")
+	}
+
+	res, err = read(ctx, rpc.NewRequest("ha_syncing", "eth_syncing", nil), true)
+	if err != nil {
+		return err
+	}
+
+	if m, ok := res.Result.(map[string]any); ok {
+		currentBlockHex := m["currentBlock"].(string)
+		highestBlockHex := m["highestBlock"].(string)
+
+		currentBlock, _ := strconv.ParseUint(currentBlockHex, 16, 64)
+		highestBlock, _ := strconv.ParseUint(highestBlockHex, 16, 64)
+
+		return fmt.Errorf("node is not synced: currentBlock=%d, highestBlock=%d", currentBlock, highestBlock)
 	}
 
 	return nil
