@@ -121,7 +121,7 @@ func SolanaHealthcheck(ctx context.Context, endpoint *Endpoint, provider *Provid
 		return err
 	}
 
-	if bf, ok := res.Result.(float64); !ok {
+	if bf, ok := res.Result.(float64); ok {
 		blockHeight := uint64(bf)
 
 		if blockHeight > provider.highestBlock {
@@ -131,6 +131,7 @@ func SolanaHealthcheck(ctx context.Context, endpoint *Endpoint, provider *Provid
 		if blockHeight < provider.highestBlock-BlockLagTolerance {
 			return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d", blockHeight, provider.highestBlock)
 		}
+	} else {
 		return fmt.Errorf("block height is not a number: %v", res.Result)
 	}
 
