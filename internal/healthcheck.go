@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
+	"log/slog"
 	"time"
 
+	"github.com/wille/haprovider/internal/eth"
 	"github.com/wille/haprovider/internal/rpc"
 )
 
@@ -18,6 +19,8 @@ const (
 
 	// Internal JSON-RPC error
 	EthErrorInternalError = -32603
+
+	BlockLagTolerance = 50
 )
 
 type Healthcheck func(ctx context.Context, p *Endpoint, e *Provider, read rpc.ReaderFunc) error
@@ -58,8 +61,24 @@ func EthereumHealthCheck(ctx context.Context, p *Endpoint, e *Provider, read rpc
 		return err
 	}
 
-	if _, ok := res.Result.(string); !ok {
-		return fmt.Errorf("block number is not a string")
+	if currentBlockHex, ok := res.Result.(string); ok {
+		currentBlock, err := eth.ParseHexNumber(currentBlockHex)
+		if err != nil {
+			return fmt.Errorf("failed to parse block number: %v (%s)", err, currentBlockHex)
+		}
+
+		if e.highestBlock != 0 && currentBlock < e.highestBlock-BlockLagTolerance {
+			log := slog.With("provider", e.Name, "endpoint", p.Name)
+			log.Warn("node is behind", "currentBlock", currentBlock, "highestBlock", e.highestBlock)
+
+			return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d", currentBlock, e.highestBlock)
+		}
+
+		if currentBlock > e.highestBlock {
+			e.highestBlock = currentBlock
+		}
+	} else {
+		return fmt.Errorf("block number is not a string: %v", res.Result)
 	}
 
 	res, err = read(ctx, rpc.NewRequest("ha_syncing", "eth_syncing", nil), true)
@@ -71,8 +90,8 @@ func EthereumHealthCheck(ctx context.Context, p *Endpoint, e *Provider, read rpc
 		currentBlockHex := m["currentBlock"].(string)
 		highestBlockHex := m["highestBlock"].(string)
 
-		currentBlock, _ := strconv.ParseUint(currentBlockHex, 16, 64)
-		highestBlock, _ := strconv.ParseUint(highestBlockHex, 16, 64)
+		currentBlock, _ := eth.ParseHexNumber(currentBlockHex)
+		highestBlock, _ := eth.ParseHexNumber(highestBlockHex)
 
 		return fmt.Errorf("node is not synced: currentBlock=%d, highestBlock=%d", currentBlock, highestBlock)
 	}
@@ -102,7 +121,16 @@ func SolanaHealthcheck(ctx context.Context, endpoint *Endpoint, provider *Provid
 		return err
 	}
 
-	if _, ok := res.Result.(float64); !ok {
+	if bf, ok := res.Result.(float64); !ok {
+		blockHeight := uint64(bf)
+
+		if blockHeight > provider.highestBlock {
+			provider.highestBlock = blockHeight
+		}
+
+		if blockHeight < provider.highestBlock-BlockLagTolerance {
+			return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d", blockHeight, provider.highestBlock)
+		}
 		return fmt.Errorf("block height is not a number: %v", res.Result)
 	}
 

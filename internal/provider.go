@@ -32,6 +32,8 @@ type Provider struct {
 	online   bool
 	onlineAt time.Time
 
+	highestBlock uint64
+
 	clientVersion string
 
 	m sync.Mutex
@@ -124,17 +126,8 @@ func (e *Provider) IsRateLimited() bool {
 	return !e.retryAt.IsZero() && time.Since(e.retryAt) < 0
 }
 
-// func (p *Provider) DelayedHealthcheck(p *Provider, delay time.Duration) error {
-// 	t := time.NewTicker(delay)
-// 	defer t.Stop()
-
-// 	<-t.C
-
-// 	return e.Healthcheck(p)
-// }
-
 func (e *Provider) Healthcheck(p *Endpoint) error {
-	ctx := context.TODO()
+	ctx := context.Background()
 
 	fn := func(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
 		res, err := SendHTTPRPCRequest(ctx, e, req)
