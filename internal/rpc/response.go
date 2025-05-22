@@ -9,9 +9,11 @@ type Response struct {
 	Version string `json:"jsonrpc"`
 
 	// ID might be a string or number
-	ID     any `json:"id,omitempty"`
-	Result any `json:"result"`
-	Error  any `json:"error,omitempty"`
+	ID     any    `json:"id,omitempty"`
+	Result any    `json:"result"`
+	Method string `json:"method"`
+	Params any    `json:"params"`
+	Error  any    `json:"error,omitempty"`
 }
 
 func (r *Response) GetID() string {

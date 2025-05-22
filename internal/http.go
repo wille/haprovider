@@ -142,8 +142,8 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 	}
 
 	if req.IsBatch {
-		rpc.BatchIDCounter++
-		log = log.With("batch_id", rpc.BatchIDCounter, "batch_size", len(req.Requests))
+		batchId := rpc.BatchIDCounter.Add(1)
+		log = log.With("batch_id", batchId, "batch_size", len(req.Requests))
 	} else {
 		log = log.With("rpc_id", req.Requests[0].GetID(), "method", req.Requests[0].Method)
 	}

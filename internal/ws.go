@@ -244,15 +244,19 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			requestLog := proxy.log
 
 			if req.IsBatch {
-				rpc.BatchIDCounter++
-
-				requestLog = requestLog.With("batch_id", rpc.BatchIDCounter, "batch_size", len(req.Requests))
+				batchId := rpc.BatchIDCounter.Add(1)
+				requestLog = requestLog.With("batch_id", batchId, "batch_size", len(req.Requests))
 			}
 
 			// Break up any batched requests into one request per message
-			for i, req := range req.Requests {
-				proxy.Requests <- req
-				requestLog.Debug("request", "batch_index", i, "rpc_id", req.GetID(), "method", req.Method)
+			for i, r := range req.Requests {
+				proxy.Requests <- r
+
+				if req.IsBatch {
+					requestLog.With("batch_index", i, "rpc_id", r.GetID(), "method", r.Method).Debug("request")
+				} else {
+					requestLog.With("rpc_id", r.GetID(), "method", r.Method).Debug("request")
+				}
 			}
 
 		case rpcResponse, ok := <-proxy.Responses:
