@@ -1,6 +1,8 @@
 package rpc
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 type Request struct {
 	Version string `json:"jsonrpc"`
@@ -18,15 +20,6 @@ func NewRequest(id string, method string, params any) *Request {
 	}
 }
 
-func SerializeRequest(req *Request) []byte {
-	b, err := json.Marshal(req)
-	if err != nil {
-		panic(err)
-	}
-
-	return b
-}
-
 func DecodeRequest(b []byte) (*Request, error) {
 	var req Request
 	err := json.Unmarshal(b, &req)
@@ -35,4 +28,16 @@ func DecodeRequest(b []byte) (*Request, error) {
 	}
 
 	return &req, nil
+}
+
+func SerializeRequest(req *Request) []byte {
+	b, err := json.Marshal(req)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func (r *Request) GetID() string {
+	return GetRequestIDString(r.ID)
 }

@@ -70,7 +70,10 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 	}
 
 	// Send a request that will trigger rate limiting
-	_, _, err := ProxyHTTP(context.Background(), provider, rpc.NewRequest("1", "eth_blockNumber", []interface{}{}), &servertiming.Header{})
+	req := rpc.NewBatchRequest(
+		rpc.NewRequest("1", "eth_blockNumber", []interface{}{}),
+	)
+	_, _, err := ProxyHTTP(context.Background(), provider, req, &servertiming.Header{})
 
 	// Verify the error and retry time was set correctly
 	assert.Error(t, err)
@@ -126,7 +129,10 @@ func TestSlowProvider(t *testing.T) {
 	timing := &servertiming.Header{}
 
 	// Attempt to proxy a request - it should use the fast provider because the first one is too slow
-	resp, endpoint, err := ProxyHTTP(context.Background(), provider, rpc.NewRequest("1", "eth_blockNumber", []interface{}{}), timing)
+	req := rpc.NewBatchRequest(
+		rpc.NewRequest("1", "eth_blockNumber", []interface{}{}),
+	)
+	resp, endpoint, err := ProxyHTTP(context.Background(), provider, req, timing)
 
 	// Verify we got a response
 	assert.NoError(t, err)
@@ -166,7 +172,10 @@ func TestNonRespondingProvider(t *testing.T) {
 
 	// Attempt to use the non-responding provider first
 	timing := &servertiming.Header{}
-	resp, endpoint, err := ProxyHTTP(context.Background(), provider, rpc.NewRequest("1", "eth_blockNumber", []interface{}{}), timing)
+	req := rpc.NewBatchRequest(
+		rpc.NewRequest("1", "eth_blockNumber", []interface{}{}),
+	)
+	resp, endpoint, err := ProxyHTTP(context.Background(), provider, req, timing)
 
 	// Verify we got a response from the working provider
 	assert.NoError(t, err)
