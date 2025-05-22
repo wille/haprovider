@@ -8,6 +8,8 @@ import (
 
 type ReaderFunc func(ctx context.Context, req *Request, errRpcError bool) (*Response, error)
 
+var BatchIDCounter = 0
+
 // GetRequestIDString returns the request ID as a string.
 // The request ID is commonly a number, but might be a string with a number or a string.
 func GetRequestIDString(id any) string {

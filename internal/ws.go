@@ -96,6 +96,13 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 	u, _ := url.Parse(provider.Ws)
 
 	headers := http.Header{}
+
+	if provider.Headers != nil {
+		for k, v := range provider.Headers {
+			headers.Set(k, v)
+		}
+	}
+
 	headers.Set("User-Agent", UserAgent)
 
 	ctx, cancel := context.WithTimeout(proxy.ctx, provider.GetTimeout())
@@ -143,6 +150,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 		case <-providerClient.ctx.Done():
 			return
 		case req := <-proxy.Requests:
+			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
 			providerClient.Write(rpc.SerializeRequest(req))
 		case message := <-providerClient.Read():
 			rpcResponse, err := rpc.DecodeResponse(message)
@@ -154,9 +162,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				return
 			}
 
-			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", rpcResponse.Method, 0, rpcResponse.IsError())
-
-			id := rpc.GetRequestIDString(rpcResponse.ID)
+			id := rpcResponse.GetID()
 			// Intercept
 			if ch := proxy.subscriptions[id]; ch != nil {
 				ch <- rpcResponse
@@ -164,6 +170,8 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			}
 
 			if rpcResponse.IsError() {
+				metrics.RecordFailedRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", "")
+
 				errorCode, errorMessage := rpcResponse.GetError()
 
 				switch errorCode {
@@ -213,7 +221,7 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 				continue
 			}
 
-			req, err := rpc.DecodeRequest(message)
+			req, err := rpc.DecodeBatchRequest(message)
 			if err != nil {
 				proxy.log.Debug("bad client request", "error", err, "msg", rpc.FormatRawBody(string(message)))
 
@@ -233,10 +241,20 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			// Reset the bad request counter
 			proxy.badRequests = 0
 
-			proxy.Requests <- req
+			requestLog := proxy.log
 
-			id := rpc.GetRequestIDString(req.ID)
-			proxy.log.Debug("request", "rpc_id", id, "method", req.Method)
+			if req.IsBatch {
+				rpc.BatchIDCounter++
+
+				requestLog = requestLog.With("batch_id", rpc.BatchIDCounter, "batch_size", len(req.Requests))
+			}
+
+			// Break up any batched requests into one request per message
+			for i, req := range req.Requests {
+				proxy.Requests <- req
+				requestLog.Debug("request", "batch_index", i, "rpc_id", req.GetID(), "method", req.Method)
+			}
+
 		case rpcResponse, ok := <-proxy.Responses:
 			if !ok {
 				proxy.log.Debug("proxy.Responses closed")

@@ -74,12 +74,13 @@ func MetricsHandler() http.Handler {
 }
 
 // RecordRequest records metrics for a request
-func RecordRequest(endpoint, provider, transport, method string, duration float64, failed bool) {
+func RecordRequest(endpoint, provider, transport, method string, duration float64) {
 	requestsTotal.WithLabelValues(endpoint, provider, transport, method).Inc()
-	if failed {
-		failedRequestsTotal.WithLabelValues(endpoint, provider, transport, method).Inc()
-	}
 	requestDuration.WithLabelValues(endpoint, provider, transport, method).Observe(duration)
+}
+
+func RecordFailedRequest(endpoint, provider, transport, method string) {
+	failedRequestsTotal.WithLabelValues(endpoint, provider, transport, method).Inc()
 }
 
 func RecordOpenConnection(endpoint, provider string) {

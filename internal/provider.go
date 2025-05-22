@@ -23,6 +23,8 @@ type Provider struct {
 	Http         string `yaml:"http"`
 	Ws           string `yaml:"ws"`
 
+	Headers map[string]string `yaml:"headers,omitempty"`
+
 	// The timeout for the provider. Use Endpoint.GetTimeout() to get the actual timeout
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 
@@ -130,17 +132,17 @@ func (e *Provider) Healthcheck(p *Endpoint) error {
 	ctx := context.Background()
 
 	fn := func(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
-		res, err := SendHTTPRPCRequest(ctx, e, req)
+		res, err := SendHTTPRPCRequest(ctx, e, rpc.NewBatchRequest(req))
 		if err != nil {
 			return nil, err
 		}
 
-		if errRpcError && res.IsError() {
-			_, err := res.GetError()
+		if errRpcError && res.Responses[0].IsError() {
+			_, err := res.Responses[0].GetError()
 			return nil, err
 		}
 
-		return res, nil
+		return res.Responses[0], nil
 	}
 
 	switch p.Kind {

@@ -25,7 +25,7 @@ var defaultClient = &http.Client{
 	},
 }
 
-func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.Request, timing *servertiming.Header) (*rpc.Response, *Provider, error) {
+func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.BatchRequest, timing *servertiming.Header) (*rpc.BatchResponse, *Provider, error) {
 	providers := endpoint.GetActiveProviders()
 
 	for _, provider := range providers {
@@ -66,6 +66,13 @@ func SendHTTPRequest(ctx context.Context, provider *Provider, body []byte) ([]by
 	}
 
 	req.Header = make(http.Header)
+
+	if provider.Headers != nil {
+		for k, v := range provider.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
@@ -93,15 +100,15 @@ func SendHTTPRequest(ctx context.Context, provider *Provider, body []byte) ([]by
 	return b, nil
 }
 
-func SendHTTPRPCRequest(ctx context.Context, p *Provider, rpcreq *rpc.Request) (*rpc.Response, error) {
-	req := rpc.SerializeRequest(rpcreq)
+func SendHTTPRPCRequest(ctx context.Context, p *Provider, req *rpc.BatchRequest) (*rpc.BatchResponse, error) {
+	body := rpc.SerializeBatchRequest(req)
 
-	b, err := SendHTTPRequest(ctx, p, req)
+	b, err := SendHTTPRequest(ctx, p, body)
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := rpc.DecodeResponse(b)
+	response, err := rpc.DecodeBatchResponse(b)
 	if err != nil {
 		return nil, fmt.Errorf("bad response: %w, raw: %s", err, string(b))
 	}
@@ -127,19 +134,26 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 		return
 	}
 
-	rpcReq, err := rpc.DecodeRequest(body)
+	req, err := rpc.DecodeBatchRequest(body)
 	if err != nil {
-		log.Error("http: bad request", "error", err, "msg", rpc.FormatRawBody(string(body)))
+		log.Error("http: bad request", "error", err, "body", rpc.FormatRawBody(string(body)))
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	log = log.With("rpc_id", rpc.GetRequestIDString(rpcReq.ID), "method", rpcReq.Method)
+	if req.IsBatch {
+		rpc.BatchIDCounter++
+		log = log.With("batch_id", rpc.BatchIDCounter, "batch_size", len(req.Requests))
+	} else {
+		log = log.With("rpc_id", req.Requests[0].GetID(), "method", req.Requests[0].Method)
+	}
 
-	res, provider, err := ProxyHTTP(ctx, endpoint, rpcReq, timing)
+	res, provider, err := ProxyHTTP(ctx, endpoint, req, timing)
 
 	if err != nil {
-		metrics.RecordRequest(endpoint.Name, provider.Name, "http", rpcReq.Method, time.Since(start).Seconds(), true)
+		for _, req := range req.Requests {
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Method)
+		}
 
 		if err == ErrNoProvidersAvailable {
 			log.Error("no providers available")
@@ -154,9 +168,33 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 
 	log = log.With("provider", provider.Name, "request_time", time.Since(start))
 
-	log.Debug("request")
+	for i, res := range req.Requests {
+		if req.IsBatch {
+			log.Debug("request", "batch_index", i, "rpc_id", res.GetID(), "method", res.Method)
+		} else {
+			// id and method is already set for this single request
+			log.Debug("request")
+		}
+	}
 
-	metrics.RecordRequest(endpoint.Name, provider.Name, "http", rpcReq.Method, time.Since(start).Seconds(), res.IsError())
+	for i, res := range res.Responses {
+		method := req.Requests[i].Method
+
+		if res.IsError() {
+			log.Error("error", "error", res.Error)
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
+		} else {
+			metrics.RecordRequest(endpoint.Name, provider.Name, "http", method, time.Since(start).Seconds())
+		}
+	}
+
+	if req.IsBatch {
+		if len(res.Responses) != len(req.Requests) {
+			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			http.Error(w, "batch response size mismatch", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	if !endpoint.Public {
 		w.Header().Set("X-Provider", provider.Name)
@@ -168,7 +206,7 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	_, err = w.Write(rpc.SerializeResponse(res))
+	_, err = w.Write(rpc.SerializeBatchResponse(res))
 	if err != nil {
 		log.Error("error writing body", "error", err)
 		return

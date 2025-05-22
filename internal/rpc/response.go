@@ -9,11 +9,13 @@ type Response struct {
 	Version string `json:"jsonrpc"`
 
 	// ID might be a string or number
-	ID     any    `json:"id,omitempty"`
-	Result any    `json:"result"`
-	Method string `json:"method,omitempty"`
-	Params any    `json:"params,omitempty"`
-	Error  any    `json:"error,omitempty"`
+	ID     any `json:"id,omitempty"`
+	Result any `json:"result"`
+	Error  any `json:"error,omitempty"`
+}
+
+func (r *Response) GetID() string {
+	return GetRequestIDString(r.ID)
 }
 
 func (r *Response) IsError() bool {
@@ -26,13 +28,13 @@ func (r *Response) GetError() (int, error) {
 		return 0, fmt.Errorf("unable to parse error: %v", r.Error)
 	}
 
-	errorCode := err["code"].(float64)
+	errorCode, _ := err["code"].(float64)
 
 	return int(errorCode), fmt.Errorf("%d %s", int(errorCode), err["message"])
 }
 
-func SerializeResponse(req *Response) []byte {
-	b, err := json.Marshal(req)
+func SerializeResponse(res *Response) []byte {
+	b, err := json.Marshal(res)
 
 	if err != nil {
 		panic(err)
