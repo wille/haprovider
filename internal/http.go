@@ -177,6 +177,8 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 		}
 	}
 
+	didGoOffline := false
+
 	for i, res := range res.Responses {
 		method := req.Requests[i].Method
 
@@ -185,6 +187,27 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
 		} else {
 			metrics.RecordRequest(endpoint.Name, provider.Name, "http", method, time.Since(start).Seconds())
+		}
+
+		if !didGoOffline && res.IsError() {
+			errorCode, errorMessage := res.GetError()
+
+			// TODO: These errors are Ethereum specific. We should handle them in a more generic way.
+			switch errorCode {
+			case EthErrorRateLimited:
+				provider.HandleTooManyRequests(nil)
+				provider.SetStatus(false, errorMessage)
+
+			case EthErrorInternalError:
+				provider.SetStatus(false, errorMessage)
+
+			default:
+				log.Warn("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", res.Error)
+				continue
+			}
+
+			// Only go offline once. We still want to return error responses to the client.
+			didGoOffline = true
 		}
 	}
 

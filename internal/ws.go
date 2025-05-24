@@ -174,11 +174,12 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 
 				errorCode, errorMessage := rpcResponse.GetError()
 
+				// TODO: These errors are Ethereum specific. We should handle them in a more generic way.
 				switch errorCode {
 				case EthErrorRateLimited:
 					// Set the provider as offline
 					err = proxy.provider.HandleTooManyRequests(nil)
-					proxy.provider.SetStatus(false, err)
+					proxy.provider.SetStatus(false, errorMessage)
 
 					// Forward the error to the client
 					proxy.Responses <- rpcResponse
