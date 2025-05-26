@@ -63,7 +63,7 @@ func (p *Provider) SetStatus(online bool, err error) {
 	p.m.Lock()
 	defer p.m.Unlock()
 
-	log := slog.With("provider", p.EndpointName, "endpoint", p.Name)
+	log := slog.With("endpoint", p.EndpointName, "provider", p.Name)
 
 	if p.online == online {
 		if !online {
