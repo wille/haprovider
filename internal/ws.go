@@ -147,6 +147,14 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 		case req := <-proxy.Requests:
 			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
 			providerClient.Write(rpc.SerializeRequest(req))
+
+			// Flush any remaining requests
+			for i := 0; i < len(proxy.Requests); i++ {
+				req := <-proxy.Requests
+				metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
+				providerClient.Write(rpc.SerializeRequest(req))
+			}
+
 		case message := <-providerClient.Read():
 			rpcResponse, err := rpc.DecodeResponse(message)
 			if err != nil {
@@ -260,8 +268,13 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 				proxy.log.Debug("proxy.Responses closed")
 				continue
 			}
-			ss := rpc.SerializeResponse(rpcResponse)
-			proxy.ClientConn.Write(ss)
+
+			proxy.ClientConn.Write(rpc.SerializeResponse(rpcResponse))
+
+			// Flush any remaining responses
+			for i := 0; i < len(proxy.Responses); i++ {
+				proxy.ClientConn.Write(rpc.SerializeResponse(<-proxy.Responses))
+			}
 		}
 	}
 }
