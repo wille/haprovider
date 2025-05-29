@@ -136,11 +136,6 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 
 	go proxy.pumpProvider(proxy.ProviderConn)
 
-	if err = proxy.Healthcheck(); err != nil {
-		providerClient.Close(websocket.CloseNormalClosure, nil)
-		return fmt.Errorf("healthcheck failed: %s", err)
-	}
-
 	return nil
 }
 
