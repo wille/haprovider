@@ -272,14 +272,18 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 }
 
 // DialAnyProvider dials any provider and returns a WebSocketProxy
-func (proxy *WebSocketProxy) DialAnyProvider(provider *Endpoint, timing *servertiming.Header) (*Provider, error) {
-	for _, endpoint := range provider.GetActiveProviders() {
-		if endpoint.Ws == "" {
+func (proxy *WebSocketProxy) DialAnyProvider(e *Endpoint, timing *servertiming.Header) (*Provider, error) {
+	for _, p := range e.Providers {
+		if p.Ws == "" {
 			continue
 		}
 
-		m := timing.NewMetric(endpoint.Name).Start()
-		err := proxy.DialProvider(provider, endpoint)
+		if !p.online {
+			continue
+		}
+
+		m := timing.NewMetric(p.Name).Start()
+		err := proxy.DialProvider(e, p)
 		m.Stop()
 
 		// In case the request was closed before the provider connection was established
@@ -294,13 +298,13 @@ func (proxy *WebSocketProxy) DialAnyProvider(provider *Endpoint, timing *servert
 		}
 
 		if err != nil {
-			endpoint.SetStatus(false, err)
+			p.SetStatus(false, err)
 			continue
 		}
 
-		endpoint.SetStatus(true, nil)
+		p.SetStatus(true, nil)
 
-		return endpoint, nil
+		return p, nil
 	}
 
 	return nil, ErrNoProvidersAvailable

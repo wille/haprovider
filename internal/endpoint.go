@@ -26,21 +26,6 @@ type Endpoint struct {
 	AddXForwardedHeaders bool `yaml:"add_xfwd_headers,omitempty"`
 }
 
-// GetActiveProviders returns a list of providers that are currently considered online
-func (p *Endpoint) GetActiveProviders() []*Provider {
-	var active []*Provider
-
-	for _, e := range p.Providers {
-		if !e.online {
-			continue
-		}
-
-		active = append(active, e)
-	}
-
-	return active
-}
-
 func (e *Endpoint) HTTPHealthcheck(provider *Provider) error {
 	// TODO move to healthcheck loop
 	if provider.IsRateLimited() {

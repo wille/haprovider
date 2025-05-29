@@ -26,9 +26,11 @@ var defaultClient = &http.Client{
 }
 
 func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.BatchRequest, timing *servertiming.Header) (*rpc.BatchResponse, *Provider, error) {
-	providers := endpoint.GetActiveProviders()
+	for _, provider := range endpoint.Providers {
+		if !provider.online {
+			continue
+		}
 
-	for _, provider := range providers {
 		m := timing.NewMetric(provider.Name).Start()
 		res, err := SendHTTPRPCRequest(ctx, provider, req)
 		m.Stop()

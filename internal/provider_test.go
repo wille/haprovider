@@ -43,8 +43,9 @@ func TestInvalidChainID(t *testing.T) {
 	assert.Contains(t, err.Error(), "chainId mismatch")
 
 	// Verify no active endpoints are returned
-	active := provider.GetActiveProviders()
-	assert.Empty(t, active)
+	for _, p := range provider.Providers {
+		assert.False(t, p.online)
+	}
 }
 
 // TestRateLimitWithRetryAfter tests connecting to a provider that returns a 429 rate limit with retry-after header
@@ -85,8 +86,9 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 	assert.True(t, provider.Providers[0].retryAt.Before(time.Now().Add(30*time.Second)))
 
 	// Verify endpoint is not returned as active during rate limiting
-	active := provider.GetActiveProviders()
-	assert.Empty(t, active)
+	for _, p := range provider.Providers {
+		assert.False(t, p.online)
+	}
 }
 
 // TestSlowProvider tests connecting to a provider that is slow to respond
