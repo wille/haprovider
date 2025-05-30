@@ -1,6 +1,6 @@
 # haprovider
 
-[![Go Report Card](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://img.shields.io/github/v/release/wille/haprovider)
+[![Go Report Card](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
 
 *High Availability Provider* is a load balancer for Ethereum and Solana JSON-RPC nodes, designed to provide reliable and 24/7 uninterrupted access to blockchains.
 
