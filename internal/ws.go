@@ -306,7 +306,10 @@ func (proxy *WebSocketProxy) DialAnyProvider(e *Endpoint, timing *servertiming.H
 		}
 
 		if err != nil {
-			p.SetStatus(false, err)
+			// In a high traffic environment, the provider might be taken offline by another concurrent request
+			if p.online {
+				p.SetStatus(false, err)
+			}
 			continue
 		}
 

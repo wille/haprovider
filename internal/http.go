@@ -44,7 +44,10 @@ func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.BatchRequest, t
 		}
 
 		if err != nil {
-			provider.SetStatus(false, err)
+			// In a high traffic environment, the provider might be taken offline by another concurrent request
+			if provider.online {
+				provider.SetStatus(false, err)
+			}
 			continue
 		}
 
