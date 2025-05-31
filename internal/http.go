@@ -124,7 +124,7 @@ func SendHTTPRPCRequest(ctx context.Context, p *Provider, req *rpc.BatchRequest)
 func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
 
-	log := slog.With("ip", r.RemoteAddr, "transport", "http", "provider", endpoint.Name)
+	log := slog.With("ip", r.RemoteAddr, "transport", "http", "endpoint", endpoint.Name)
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
