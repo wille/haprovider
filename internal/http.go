@@ -156,8 +156,10 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 	res, provider, err := ProxyHTTP(ctx, endpoint, req, timing)
 
 	if err != nil {
-		for _, req := range req.Requests {
-			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Method)
+		if provider != nil {
+			for _, req := range req.Requests {
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Method)
+			}
 		}
 
 		if err == ErrNoProvidersAvailable {
