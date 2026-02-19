@@ -13,7 +13,52 @@ type Response struct {
 	Result any    `json:"result"`
 	Method string `json:"method"`
 	Params any    `json:"params"`
-	Error  any    `json:"error,omitempty"`
+
+	// Error is only part of error responses.
+	Error any `json:"error,omitempty"`
+}
+
+func (r Response) MarshalJSON() ([]byte, error) {
+	// JSON-RPC notification: {"jsonrpc":"2.0","method":"...","params":...}
+	if r.Method != "" {
+		type notification struct {
+			Version string `json:"jsonrpc"`
+			Method  string `json:"method"`
+			Params  any    `json:"params,omitempty"`
+		}
+		return json.Marshal(notification{
+			Version: r.Version,
+			Method:  r.Method,
+			Params:  r.Params,
+		})
+	}
+
+	// Error response: {"jsonrpc":"2.0","id":...,"error":...}
+	if r.Error != nil {
+		type errorResponse struct {
+			Version string `json:"jsonrpc"`
+			ID      any    `json:"id,omitempty"`
+			Error   any    `json:"error"`
+		}
+		return json.Marshal(errorResponse{
+			Version: r.Version,
+			ID:      r.ID,
+			Error:   r.Error,
+		})
+	}
+
+	// Success response: {"jsonrpc":"2.0","id":...,"result":...}
+	// Note: result must be included even when it's null.
+	type successResponse struct {
+		Version string `json:"jsonrpc"`
+		ID      any    `json:"id,omitempty"`
+		Result  any    `json:"result"`
+	}
+	return json.Marshal(successResponse{
+		Version: r.Version,
+		ID:      r.ID,
+		Result:  r.Result,
+	})
 }
 
 func (r *Response) GetID() string {
