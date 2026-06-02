@@ -52,12 +52,14 @@ const (
 	DefaultLogLevel            = "info"
 	DefaultLogJSON             = false
 	DefaultHealthcheckInterval = 30 * time.Second
+	// Empty by default; metrics disabled unless explicitly set
+	DefaultMetricsPort = ""
 )
 
 func main() {
 	var configFile = flag.String("config", DefaultConfigFile, "config file ($HA_CONFIGFILE) (Raw config can be provided via $HA_CONFIG)")
 	var port = flag.String("port", DefaultPort, "http service port ($HA_PORT)")
-	var metricsPort = flag.String("metrics-port", DefaultMetricsPort, "metrics port ($HA_METRICS_PORT)")
+	var metricsPort = flag.String("metrics-port", DefaultMetricsPort, "metrics port ($HA_METRICS_PORT). Leave empty to disable.")
 	var logLevel = flag.String("log-level", DefaultLogLevel, "logging level (debug, info, warn, error) ($HA_LOG_LEVEL)")
 	var logJSON = flag.Bool("log-json", DefaultLogJSON, "enable JSON logging ($HA_LOG_JSON)")
 	var healthcheckInterval = flag.String("healthcheck-interval", DefaultHealthcheckInterval.String(), "healthcheck interval duration (e.g. 10s, 1m) ($HA_HEALTHCHECK_INTERVAL)")
@@ -93,7 +95,7 @@ func main() {
 		}
 	}
 
-	if *metricsPort == DefaultMetricsPort {
+	if *metricsPort == "" {
 		env := os.Getenv("HA_METRICS_PORT")
 		if env != "" {
 			*metricsPort = env
@@ -227,27 +229,35 @@ func main() {
 		Handler: mainMux,
 	}
 
-	// Metrics server
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", metrics.MetricsHandler())
+	// Metrics server (optional)
+	var metricsServer *http.Server
 
-	metricsServer := &http.Server{
-		Addr:    *metricsPort,
-		Handler: metricsMux,
+	if *metricsPort != "" {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", metrics.MetricsHandler())
+		metricsServer = &http.Server{
+			Addr:    *metricsPort,
+			Handler: metricsMux,
+		}
 	}
 
-	// Start both servers
-	go func() {
-		slog.Info("starting metrics server", "version", internal.Version, "addr", *metricsPort)
-		if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("metrics server error", "error", err)
-		}
-	}()
+	// Channel to catch server errors and exit fatally
+	errCh := make(chan error, 2)
+
+	// Start metrics server (if enabled)
+	if metricsServer != nil {
+		go func() {
+			slog.Info("starting metrics server", "version", internal.Version, "addr", metricsServer.Addr)
+			if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
 
 	go func() {
 		slog.Info("starting haprovider", "version", internal.Version, "addr", *port)
 		if err := mainServer.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("main server error", "error", err)
+			errCh <- err
 		}
 	}()
 
@@ -255,13 +265,28 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
-	<-interrupt
-	slog.Info("shutting down...")
+	// Wait for either interrupt signal or server error
+	hadServerError := false
+	select {
+	case <-interrupt:
+		slog.Info("shutting down...")
+	case err := <-errCh:
+		slog.Error("startup failure", "error", err)
+		// Proceed to shutdown and then exit non-zero
+		hadServerError = true
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Shutdown both servers
-	metricsServer.Shutdown(ctx)
+	// Shutdown servers
+	if metricsServer != nil {
+		metricsServer.Shutdown(ctx)
+	}
 	mainServer.Shutdown(ctx)
+
+	// If we exited due to a server error, terminate with non-zero status
+	if hadServerError {
+		os.Exit(1)
+	}
 }
