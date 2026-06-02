@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"time"
 
 	"github.com/wille/haprovider/internal/eth"
 	"github.com/wille/haprovider/internal/rpc"
 )
 
 const (
-	DefaultHealthcheckInterval = 10 * time.Second
-
 	// Rate limited
 	EthErrorRateLimited = -32005
 

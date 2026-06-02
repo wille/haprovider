@@ -10,11 +10,12 @@ import (
 const DefaultRateLimitBackoff = time.Duration(30) * time.Second
 
 type Config struct {
-	Endpoints   map[string]*Endpoint `yaml:"endpoints"`
-	LogLevel    string               `yaml:"log_level,omitempty"`
-	LogJSON     bool                 `yaml:"log_json,omitempty"`
-	Port        string               `yaml:"port,omitempty"`
-	MetricsPort string               `yaml:"metrics_port,omitempty"`
+	Endpoints           map[string]*Endpoint `yaml:"endpoints"`
+	LogLevel            string               `yaml:"log_level,omitempty"`
+	LogJSON             bool                 `yaml:"log_json,omitempty"`
+	Port                string               `yaml:"port,omitempty"`
+	MetricsPort         string               `yaml:"metrics_port,omitempty"`
+	HealthcheckInterval string               `yaml:"healthcheck_interval,omitempty"`
 }
 
 func LoadConfig(configFile string) *Config {

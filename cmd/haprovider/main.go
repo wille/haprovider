@@ -47,11 +47,11 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 var config *internal.Config
 
 const (
-	DefaultConfigFile  = "config.yml"
-	DefaultPort        = "127.0.0.1:8080"
-	DefaultLogLevel    = "info"
-	DefaultLogJSON     = false
-	DefaultMetricsPort = "127.0.0.1:9090"
+	DefaultConfigFile          = "config.yml"
+	DefaultPort                = "127.0.0.1:8080"
+	DefaultLogLevel            = "info"
+	DefaultLogJSON             = false
+	DefaultHealthcheckInterval = 30 * time.Second
 )
 
 func main() {
@@ -60,6 +60,7 @@ func main() {
 	var metricsPort = flag.String("metrics-port", DefaultMetricsPort, "metrics port ($HA_METRICS_PORT)")
 	var logLevel = flag.String("log-level", DefaultLogLevel, "logging level (debug, info, warn, error) ($HA_LOG_LEVEL)")
 	var logJSON = flag.Bool("log-json", DefaultLogJSON, "enable JSON logging ($HA_LOG_JSON)")
+	var healthcheckInterval = flag.String("healthcheck-interval", DefaultHealthcheckInterval.String(), "healthcheck interval duration (e.g. 10s, 1m) ($HA_HEALTHCHECK_INTERVAL)")
 
 	flag.Parse()
 
@@ -99,6 +100,23 @@ func main() {
 		} else if config.MetricsPort != "" {
 			*metricsPort = config.MetricsPort
 		}
+	}
+
+	if *healthcheckInterval == DefaultHealthcheckInterval.String() {
+		env := os.Getenv("HA_HEALTHCHECK_INTERVAL")
+		if env != "" {
+			*healthcheckInterval = env
+		} else if config.HealthcheckInterval != "" {
+			*healthcheckInterval = config.HealthcheckInterval
+		}
+	}
+
+	parsedHealthcheckInterval, err := time.ParseDuration(*healthcheckInterval)
+	if err != nil {
+		log.Fatalf("invalid healthcheck interval %q: %v", *healthcheckInterval, err)
+	}
+	if parsedHealthcheckInterval <= 0 {
+		log.Fatalf("healthcheck interval must be > 0, got %q", *healthcheckInterval)
 	}
 
 	// Set log level from config if not specified by command line
@@ -184,7 +202,7 @@ func main() {
 
 					wg.Done()
 
-					c := time.NewTicker(internal.DefaultHealthcheckInterval)
+					c := time.NewTicker(parsedHealthcheckInterval)
 					for range c.C {
 						endpoint.HTTPHealthcheck(provider)
 					}
