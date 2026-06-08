@@ -1,6 +1,9 @@
 # haprovider
 
 [![Go Report Card](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
+[![Go Report Card](https://goreportcard.com/badge/github.com/wille/haprovider?style=flat-square)](https://goreportcard.com/report/github.com/wille/haprovider)
+[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg?style=flat-square)](https://www.repostatus.org/#active)
+[![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/wille/haprovider?logo=go&style=flat-square)](https://go.dev)
 
 *High Availability Provider* is a load balancer for Ethereum and Solana JSON-RPC nodes, designed to provide reliable and 24/7 uninterrupted access to blockchains.
 

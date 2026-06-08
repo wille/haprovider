@@ -1,6 +1,6 @@
 module github.com/wille/haprovider
 
-go 1.24.2
+go 1.26.4
 
 require (
 	github.com/gorilla/websocket v1.5.3
