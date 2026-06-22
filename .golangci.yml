@@ -5,5 +5,5 @@ run:
   tests: true
 
 linters:
-  disable:
+  enable:
     - errcheck

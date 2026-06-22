@@ -82,11 +82,11 @@ func (c *Client) destroy(cause error) {
 }
 
 func (c *Client) readPump() {
-	defer c.Conn.Close()
+	defer func() { _ = c.Conn.Close() }()
 
-	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.Latency = time.Since(c.pingStart)
 		return nil
 	})
@@ -106,17 +106,17 @@ func (c *Client) readPump() {
 func (c *Client) writePump() {
 	tick := time.NewTicker(pingPeriod)
 	defer tick.Stop()
-	defer c.Conn.Close()
+	defer func() { _ = c.Conn.Close() }()
 
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
 		case data := <-c.close:
-			c.Conn.WriteMessage(websocket.CloseMessage, data)
+			_ = c.Conn.WriteMessage(websocket.CloseMessage, data)
 			return
 		case <-tick.C:
-			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 
 			pingData := []byte("haprovider/" + strconv.Itoa(c.pingcnt))
 			c.pingcnt++
@@ -129,7 +129,7 @@ func (c *Client) writePump() {
 			}
 
 		case message, ok := <-c.send:
-			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				c.destroy(fmt.Errorf("write: channel closed"))
 				return

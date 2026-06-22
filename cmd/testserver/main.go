@@ -67,7 +67,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		w.Write(rpc.SerializeResponse(resp))
+		_, _ = w.Write(rpc.SerializeResponse(resp))
 
 		return
 	}
@@ -77,7 +77,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	client := internal.NewClient(ws)
 

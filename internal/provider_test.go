@@ -18,7 +18,7 @@ func TestInvalidChainID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return a different chainID (0x2 instead of 0x1)
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x2"}`))
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x2"}`))
 	}))
 	defer server.Close()
 
@@ -55,7 +55,7 @@ func TestRateLimitWithRetryAfter(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "5") // Retry after 5 seconds
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limit exceeded"}}`))
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limit exceeded"}}`))
 	}))
 	defer server.Close()
 
@@ -98,14 +98,14 @@ func TestSlowProvider(t *testing.T) {
 		// Sleep to simulate a slow response
 		time.Sleep(time.Second)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
 	}))
 	defer server.Close()
 
 	// Setup a fast server as an alternative
 	fastServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
 	}))
 	defer fastServer.Close()
 
@@ -151,7 +151,7 @@ func TestNonRespondingProvider(t *testing.T) {
 	// Create a provider with a non-responding endpoint and a working endpoint
 	workingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
 	}))
 	defer workingServer.Close()
 

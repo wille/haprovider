@@ -202,7 +202,7 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 			// TODO: These errors are Ethereum specific. We should handle them in a more generic way.
 			switch errorCode {
 			case EthErrorRateLimited:
-				provider.HandleTooManyRequests(nil)
+				_ = provider.HandleTooManyRequests(nil)
 				provider.SetStatus(false, errorMessage)
 
 			case EthErrorInternalError:

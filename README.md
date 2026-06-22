@@ -46,8 +46,11 @@
 ## Installation
 
 ```bash
+# Prebuilt binary: download from the releases page
+# https://github.com/wille/haprovider/releases
+
 # Using Go
-go install github.com/wille/haprovider
+go install github.com/wille/haprovider/cmd/haprovider@latest
 
 # Using Docker
 docker pull ghcr.io/wille/haprovider

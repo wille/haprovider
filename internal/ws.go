@@ -122,10 +122,10 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 	case http.StatusSwitchingProtocols:
 		break
 	case http.StatusTooManyRequests: // Some providers might send a 429 on the websocket connection attempt
-		ws.Close()
+		_ = ws.Close()
 		return provider.HandleTooManyRequests(resp)
 	default:
-		ws.Close()
+		_ = ws.Close()
 		return fmt.Errorf("status code %d", resp.StatusCode)
 	}
 

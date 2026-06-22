@@ -206,7 +206,7 @@ func main() {
 
 					c := time.NewTicker(parsedHealthcheckInterval)
 					for range c.C {
-						endpoint.HTTPHealthcheck(provider)
+						_ = endpoint.HTTPHealthcheck(provider)
 					}
 				}()
 			} else if provider.Ws != "" {
@@ -281,9 +281,9 @@ func main() {
 
 	// Shutdown servers
 	if metricsServer != nil {
-		metricsServer.Shutdown(ctx)
+		_ = metricsServer.Shutdown(ctx)
 	}
-	mainServer.Shutdown(ctx)
+	_ = mainServer.Shutdown(ctx)
 
 	// If we exited due to a server error, terminate with non-zero status
 	if hadServerError {
