@@ -1,0 +1,62 @@
+# Documentation: https://goreleaser.com
+version: 2
+
+project_name: haprovider
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: haprovider
+    main: ./cmd/haprovider
+    binary: haprovider
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/wille/haprovider/internal.Version={{.Version}}
+
+archives:
+  - id: haprovider
+    formats: [tar.gz]
+    # Use zip on Windows
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - src: config.yml
+        dst: config.example.yml
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: wille
+    name: haprovider
+  draft: false
+  prerelease: auto
