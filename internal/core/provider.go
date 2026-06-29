@@ -18,11 +18,6 @@ const DefaultRateLimitBackoff = 30 * time.Second
 const DefaultNodeVersionRetention = time.Hour
 const DefaultConnectionTimeout = 10 * time.Second
 
-type Auth struct {
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-}
-
 type Provider struct {
 
 	// Name of the provider
@@ -32,8 +27,7 @@ type Provider struct {
 	Http string `yaml:"http"`
 
 	// Websocket endpoint to use for the provider
-	Ws   string `yaml:"ws"`
-	Auth Auth   `yaml:"auth,omitempty"`
+	Ws string `yaml:"ws"`
 
 	// Headers to send with the requests
 	Headers map[string]string `yaml:"headers,omitempty"`

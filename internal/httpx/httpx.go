@@ -7,7 +7,6 @@ package httpx
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -114,10 +113,6 @@ func SendHTTPRequest(ctx context.Context, provider *core.Provider, rawURL string
 		return nil, err
 	}
 
-	if provider.Auth.User != "" && provider.Auth.Password != "" {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(provider.Auth.User+":"+provider.Auth.Password)))
-	}
-
 	if provider.Headers != nil {
 		for k, v := range provider.Headers {
 			req.Header.Set(k, v)
@@ -199,10 +194,6 @@ func ForwardHTTPRequest(ctx context.Context, provider *core.Provider, method, ra
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
-	}
-
-	if provider.Auth.User != "" && provider.Auth.Password != "" {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(provider.Auth.User+":"+provider.Auth.Password)))
 	}
 
 	if provider.Headers != nil {

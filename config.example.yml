@@ -117,8 +117,9 @@ endpoints:
         http: https://api.devnet.solana.com
         ws: wss://api.devnet.solana.com
 
-  # Bitcoin mainnet. JSON-RPC over HTTP; most nodes require auth (see auth: below),
-  # but PublicNode exposes a key-free gateway.
+  # Bitcoin mainnet. JSON-RPC over HTTP; self-hosted nodes usually require auth
+  # (pass it via an Authorization header, see headers: below), but PublicNode
+  # exposes a key-free gateway.
   bitcoin:
     kind: btc
     chainId: mainnet
@@ -133,9 +134,6 @@ endpoints:
 #     timeout: 10s                 # request timeout (default 10s)
 #     headers:                     # extra headers; ${ENV_VARS} are expanded
 #       Authorization: "Bearer ${MY_API_KEY}"
-#     auth:                        # HTTP basic auth (e.g. a self-hosted Bitcoin node)
-#       user: ${RPC_USER}
-#       password: ${RPC_PASSWORD}
 #
 # Optional per-endpoint fields:
 #   public: true                   # hide debug headers / detailed errors from clients

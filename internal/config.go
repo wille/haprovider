@@ -84,11 +84,6 @@ func LoadConfig(configFile string) *Config {
 					provider.Headers[k] = os.ExpandEnv(v)
 				}
 			}
-
-			if provider.Auth.User != "" && provider.Auth.Password != "" {
-				provider.Auth.User = os.ExpandEnv(provider.Auth.User)
-				provider.Auth.Password = os.ExpandEnv(provider.Auth.Password)
-			}
 		}
 	}
 

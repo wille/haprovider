@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -80,10 +79,6 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *core.Endpoint, provider *cor
 	u, _ := url.Parse(provider.Ws)
 
 	headers := http.Header{}
-
-	if provider.Auth.User != "" && provider.Auth.Password != "" {
-		headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(provider.Auth.User+":"+provider.Auth.Password)))
-	}
 
 	if provider.Headers != nil {
 		for k, v := range provider.Headers {

@@ -1,8 +1,6 @@
 # haprovider
 
 [![Release](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/wille/haprovider/commit.yml?branch=master&style=flat-square)](https://github.com/wille/haprovider/actions)
-[![Go Reference](https://img.shields.io/badge/go.dev-reference-blue?style=flat-square&logo=go)](https://pkg.go.dev/github.com/wille/haprovider)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wille/haprovider?style=flat-square)](https://goreportcard.com/report/github.com/wille/haprovider)
 [![License: MIT](https://img.shields.io/github/license/wille/haprovider?style=flat-square)](LICENSE)
 [![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg?style=flat-square)](https://www.repostatus.org/#active)
@@ -12,9 +10,9 @@
 ```mermaid
 flowchart LR
     C[dApp / client] -->|"JSON-RPC / WebSocket"| HA(haprovider)
-    HA --> P1[Your node]
-    HA --> P2[Infura / QuickNode]
-    HA --> P3[Public RPC]
+    HA --> P1["http://node-1:8545"]
+    HA --> P2["https://mainnet.infura.io/v3/KEY"]
+    HA --> P3["https://eth.llamarpc.com"]
     HA -. "fails over on error, rate-limit (429 / -32005), or block-lag" .-> P2
 ```
 
@@ -87,6 +85,27 @@ endpoints:
 2. Start the service:
 ```bash
 $ haprovider
+```
+
+On startup haprovider connects to every configured provider, validates each one
+(chain id, block height, client version) and starts serving once at least one is
+healthy. Running against [`config.example.yml`](config.example.yml) (output abbreviated):
+
+```console
+$ haprovider --config config.example.yml
+INF starting haprovider version=dev healthcheck_interval=30s
+INF connecting to provider=eth/PublicNode http=https://ethereum-rpc.publicnode.com
+INF connecting to provider=solana/PublicNode http=https://solana-rpc.publicnode.com
+INF connecting to provider=bitcoin/PublicNode http=https://bitcoin-rpc.publicnode.com
+# … one line per configured provider …
+INF provider connected provider=eth/PublicNode client_version=Geth/v1.17.1-stable chain_id=1 block_height=25426434 took=137ms
+INF provider connected provider=base/PublicNode client_version=reth/v2.3.0 chain_id=8453 block_height=47992129 took=140ms
+INF provider connected provider=solana/PublicNode client_version=4.0.3 chain_id=mainnet block_height=407831156 took=143ms
+INF provider connected provider=tron/TronGrid client_version=TRON/v4.8.1/Linux/Java1.8 chain_id=mainnet block_height=84034632 took=222ms
+INF provider connected provider=bitcoin/PublicNode client_version=/Satoshi:29.3.0/ chain_id=mainnet block_height=955985 took=421ms
+ERR provider failed provider=eth/dRPC error="http 500: rpc 31: Batch of more than 3 requests are not allowed on free tier …"
+ERR provider failed provider=eth/Ankr error="rpc -32000: Unauthorized: You must authenticate your request with an API key …"
+INF started. 14/21 providers connected version=dev addr=:8080
 ```
 
 Or with command line options:
