@@ -17,8 +17,8 @@ func TestRPCResponse_IsError(t *testing.T) {
 	}
 
 	code, err := rpcResponse.GetError()
-	if err.Error() != "-32000 Internal error" {
-		t.Fatalf("expected error code -32000, got %d", code)
+	if err.Error() != "rpc -32000: Internal error" {
+		t.Fatalf("expected error code -32000, got %s", err.Error())
 	}
 
 	if code != -32000 {

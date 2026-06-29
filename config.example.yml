@@ -1,0 +1,143 @@
+# haprovider example configuration, pre-filled with free public RPC endpoints.
+#
+# Copy to config.yml and adjust:
+#   cp config.example.yml config.yml
+#
+# The public endpoints below are rate-limited and best-effort. For production,
+# add your own provider URLs (Infura, QuickNode, Alchemy, ...) and/or self-hosted
+# nodes as additional providers — haprovider health-checks each one and fails over
+# between them automatically. Providers are tried in order, so list your preferred
+# (e.g. local) node first.
+
+# Address haprovider listens on for incoming JSON-RPC / WebSocket requests.
+port: :8080
+
+# Expose Prometheus metrics (uncomment to enable).
+#metrics_port: :9090
+
+# How often each provider is health-checked (default 30s).
+#healthcheck_interval: 30s
+
+# log_level: info   # debug, info, warn, error
+# log_json: false
+
+endpoints:
+  # Ethereum mainnet. "eth" is the default kind, so it can be omitted.
+  eth:
+    chainId: "1"
+    # Cap upstream response size in bytes (default 100MB, 0 = unlimited). Raise it
+    # if you query very large responses (wide eth_getLogs ranges, traces).
+    #max_response_size: 104857600
+    providers:
+      - name: PublicNode
+        http: https://ethereum-rpc.publicnode.com
+        ws: wss://ethereum-rpc.publicnode.com
+      - name: LlamaRPC
+        http: https://eth.llamarpc.com
+        ws: wss://eth.llamarpc.com
+      - name: dRPC
+        http: https://eth.drpc.org
+        ws: wss://eth.drpc.org
+      - name: 1RPC
+        http: https://1rpc.io/eth
+      - name: Ankr
+        http: https://rpc.ankr.com/eth
+
+  # Ethereum Sepolia testnet.
+  sepolia:
+    chainId: "11155111"
+    providers:
+      - name: PublicNode
+        http: https://ethereum-sepolia-rpc.publicnode.com
+        ws: wss://ethereum-sepolia-rpc.publicnode.com
+      - name: dRPC
+        http: https://sepolia.drpc.org
+        ws: wss://sepolia.drpc.org
+
+  # Base mainnet (EVM, Optimism stack).
+  base:
+    chainId: "8453"
+    providers:
+      - name: Base
+        http: https://mainnet.base.org
+      - name: PublicNode
+        http: https://base-rpc.publicnode.com
+        ws: wss://base-rpc.publicnode.com
+      - name: dRPC
+        http: https://base.drpc.org
+        ws: wss://base.drpc.org
+      - name: LlamaRPC
+        http: https://base.llamarpc.com
+        ws: wss://base.llamarpc.com
+      - name: 1RPC
+        http: https://1rpc.io/base
+
+  # Base Sepolia testnet.
+  base_sepolia:
+    chainId: "84532"
+    providers:
+      - name: Base
+        http: https://sepolia.base.org
+      - name: PublicNode
+        http: https://base-sepolia-rpc.publicnode.com
+        ws: wss://base-sepolia-rpc.publicnode.com
+      - name: dRPC
+        http: https://base-sepolia.drpc.org
+        ws: wss://base-sepolia.drpc.org
+
+  # Tron mainnet. Requests are proxied as JSON-RPC and the healthcheck uses the
+  # Ethereum-compatible interface, so point http at the /jsonrpc endpoint. (The
+  # native /wallet/... HTTP API is also forwarded for paths under /tron/.)
+  tron:
+    kind: tron
+    chainId: mainnet
+    providers:
+      - name: TronGrid
+        http: https://api.trongrid.io/jsonrpc
+      - name: PublicNode
+        http: https://tron-rpc.publicnode.com/jsonrpc
+
+  # Solana mainnet.
+  solana:
+    kind: solana
+    chainId: mainnet
+    providers:
+      - name: Solana Foundation
+        http: https://api.mainnet-beta.solana.com
+        ws: wss://api.mainnet-beta.solana.com
+      - name: PublicNode
+        http: https://solana-rpc.publicnode.com
+
+  # Solana devnet.
+  solana_devnet:
+    kind: solana
+    chainId: devnet
+    providers:
+      - name: Solana Foundation
+        http: https://api.devnet.solana.com
+        ws: wss://api.devnet.solana.com
+
+  # Bitcoin mainnet. JSON-RPC over HTTP; most nodes require auth (see auth: below),
+  # but PublicNode exposes a key-free gateway.
+  bitcoin:
+    kind: btc
+    chainId: mainnet
+    providers:
+      - name: PublicNode
+        http: https://bitcoin-rpc.publicnode.com
+
+# Optional per-provider fields:
+#   - name: example
+#     http: https://example.com/rpc
+#     ws: wss://example.com/rpc
+#     timeout: 10s                 # request timeout (default 10s)
+#     headers:                     # extra headers; ${ENV_VARS} are expanded
+#       Authorization: "Bearer ${MY_API_KEY}"
+#     auth:                        # HTTP basic auth (e.g. a self-hosted Bitcoin node)
+#       user: ${RPC_USER}
+#       password: ${RPC_PASSWORD}
+#
+# Optional per-endpoint fields:
+#   public: true                   # hide debug headers / detailed errors from clients
+#   add_xfwd_headers: true         # add X-Forwarded-For to upstream requests
+#   block_lag_tolerance: 50        # max blocks a provider may trail the highest seen

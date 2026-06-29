@@ -14,7 +14,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -ldflags "-X github.com/wille/haprovider/internal.Version=${VERSION}" -o haprovider cmd/haprovider/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -ldflags "-X github.com/wille/haprovider/internal/httpx.Version=${VERSION}" -o haprovider cmd/haprovider/main.go
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

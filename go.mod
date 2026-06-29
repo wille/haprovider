@@ -4,9 +4,11 @@ go 1.26.4
 
 require (
 	github.com/gorilla/websocket v1.5.3
+	github.com/lmittmann/tint v1.1.3
 	github.com/mitchellh/go-server-timing v1.0.1
 	github.com/prometheus/client_golang v1.21.1
 	github.com/stretchr/testify v1.10.0
+	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -24,7 +26,7 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	google.golang.org/protobuf v1.36.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

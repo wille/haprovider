@@ -1,7 +1,9 @@
-package internal
+package ws
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,9 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/chain"
+	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/metrics"
 	"github.com/wille/haprovider/internal/rpc"
 
@@ -29,7 +34,16 @@ const (
 
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = 5 * time.Second
+
+	// PrimaryProviderCheckInterval is the interval at which we check if the primary provider is back online.
+	PrimaryProviderCheckInterval = time.Minute
+
+	// PrimaryProviderAliveThreshold is the threshold for which we consider the primary provider alive
+	// and close connections to secondary providers so they can reconnect to the primary provider.
+	PrimaryProviderAliveThreshold = 5 * time.Minute
 )
+
+var ErrNoProvidersAvailable = errors.New("no providers available")
 
 type WebSocketProxy struct {
 	// The request context
@@ -38,8 +52,8 @@ type WebSocketProxy struct {
 
 	log *slog.Logger
 
-	endpoint *Endpoint
-	provider *Provider
+	endpoint *core.Endpoint
+	provider *core.Provider
 
 	// ClientConn is the incoming client connection
 	ClientConn *Client
@@ -53,37 +67,7 @@ type WebSocketProxy struct {
 	// Provider responses to be sent to the client
 	Responses chan *rpc.Response
 
-	subscriptions map[string]chan *rpc.Response
-
 	badRequests int
-}
-
-func (r *WebSocketProxy) AwaitReply(ctx context.Context, req *rpc.Request, errRpcError bool) (*rpc.Response, error) {
-	ch := make(chan *rpc.Response, 1)
-	defer close(ch)
-
-	id := rpc.GetRequestIDString(req.ID)
-
-	r.subscriptions[id] = ch
-	defer delete(r.subscriptions, id)
-
-	r.Requests <- req
-
-	select {
-	case reply := <-ch:
-		if errRpcError && reply.IsError() {
-			_, err := reply.GetError()
-			return reply, err
-		}
-
-		return reply, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (r *WebSocketProxy) Healthcheck() error {
-	return r.provider.Healthcheck(r.endpoint)
 }
 
 // Close destroys the proxy connection.
@@ -92,10 +76,14 @@ func (p *WebSocketProxy) Close(reason error) {
 	p.cancel(reason)
 }
 
-func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider) error {
+func (proxy *WebSocketProxy) DialProvider(endpoint *core.Endpoint, provider *core.Provider) error {
 	u, _ := url.Parse(provider.Ws)
 
 	headers := http.Header{}
+
+	if provider.Auth.User != "" && provider.Auth.Password != "" {
+		headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(provider.Auth.User+":"+provider.Auth.Password)))
+	}
 
 	if provider.Headers != nil {
 		for k, v := range provider.Headers {
@@ -103,7 +91,8 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 		}
 	}
 
-	headers.Set("User-Agent", UserAgent)
+	headers.Set("User-Agent", httpx.UserAgent)
+	httpx.SetForwardedFor(proxy.ctx, headers)
 
 	ctx, cancel := context.WithTimeout(proxy.ctx, provider.GetTimeout())
 	defer cancel()
@@ -115,19 +104,19 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 	}
 	ws, resp, err := dialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
+		// A failed handshake returns websocket.ErrBadHandshake with a non-nil
+		// resp (and a nil conn). Some providers send a 429 on the connection
+		// attempt; honor it like an HTTP 429 instead of a generic error.
+		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+			return provider.HandleTooManyRequests(resp)
+		}
 		return err
 	}
 
-	switch resp.StatusCode {
-	case http.StatusSwitchingProtocols:
-		break
-	case http.StatusTooManyRequests: // Some providers might send a 429 on the websocket connection attempt
-		_ = ws.Close()
-		return provider.HandleTooManyRequests(resp)
-	default:
-		_ = ws.Close()
-		return fmt.Errorf("status code %d", resp.StatusCode)
-	}
+	// A nil error from DialContext means the handshake succeeded (101).
+	// Bound upstream message size before the read pump starts. gorilla enforces
+	// this against the decompressed size, so it also caps decompression bombs.
+	ws.SetReadLimit(endpoint.GetMaxResponseSize())
 
 	providerClient := NewClient(ws)
 
@@ -139,6 +128,29 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *Endpoint, provider *Provider
 	return nil
 }
 
+// writeRequest serializes a client request and forwards it to the provider. A
+// serialization failure (should be impossible for decoded JSON-RPC) is logged
+// and the message dropped rather than panicking the pump goroutine.
+func (proxy *WebSocketProxy) writeRequest(providerClient *Client, req *rpc.Request) {
+	data, err := rpc.SerializeRequest(req)
+	if err != nil {
+		proxy.log.Error("dropping request: failed to serialize", "error", err, "method", req.Method)
+		return
+	}
+	providerClient.Write(data)
+}
+
+// writeResponse serializes a provider response and forwards it to the client,
+// logging and dropping on a serialization failure instead of panicking.
+func (proxy *WebSocketProxy) writeResponse(res *rpc.Response) {
+	data, err := rpc.SerializeResponse(res)
+	if err != nil {
+		proxy.log.Error("dropping response: failed to serialize", "error", err)
+		return
+	}
+	proxy.ClientConn.Write(data)
+}
+
 func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 	for {
 		select {
@@ -146,13 +158,13 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			return
 		case req := <-proxy.Requests:
 			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
-			providerClient.Write(rpc.SerializeRequest(req))
+			proxy.writeRequest(providerClient, req)
 
 			// Flush any remaining requests
 			for i := 0; i < len(proxy.Requests); i++ {
 				req := <-proxy.Requests
 				metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
-				providerClient.Write(rpc.SerializeRequest(req))
+				proxy.writeRequest(providerClient, req)
 			}
 
 		case message := <-providerClient.Read():
@@ -160,16 +172,9 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			if err != nil {
 				err := fmt.Errorf("received bad data from provider: %s, msg: %s", err, rpc.FormatRawBody(string(message)))
 				proxy.Close(err)
-				proxy.ProviderConn.Close(websocket.CloseUnsupportedData, nil)
+				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 				proxy.ClientConn.Close(websocket.CloseUnsupportedData, err)
 				return
-			}
-
-			id := rpcResponse.GetID()
-			// Intercept
-			if ch := proxy.subscriptions[id]; ch != nil {
-				ch <- rpcResponse
-				continue
 			}
 
 			if rpcResponse.IsError() {
@@ -177,35 +182,17 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 
 				errorCode, errorMessage := rpcResponse.GetError()
 
-				// TODO: These errors are Ethereum specific. We should handle them in a more generic way.
-				switch errorCode {
-				case EthErrorRateLimited:
-					// Set the provider as offline
-					err = proxy.provider.HandleTooManyRequests(nil)
-					proxy.provider.SetStatus(false, errorMessage)
+				err := chain.New(proxy.endpoint.Kind).HandleError(errorCode, errorMessage.Error())
 
-					// Forward the error to the client
+				if err != nil {
+					proxy.provider.MarkUnhealthy(err)
 					proxy.Responses <- rpcResponse
-
-					// Close the connection
 					proxy.Close(err)
-					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 					proxy.ClientConn.Close(websocket.CloseServiceRestart, err)
+					proxy.ProviderConn.Close(websocket.CloseTryAgainLater, nil)
 					return
-				case EthErrorInternalError:
-					// Set the provider as offline
-					proxy.provider.SetStatus(false, errorMessage)
-
-					// Forward the error to the client
-					proxy.Responses <- rpcResponse
-
-					// Close the connection
-					proxy.Close(err)
-					proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
-					proxy.ClientConn.Close(websocket.CloseTryAgainLater, err)
-					return
-				default:
-					proxy.log.Warn("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
+				} else {
+					proxy.log.Debug("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
 				}
 			}
 
@@ -226,6 +213,9 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			}
 
 			req, err := rpc.DecodeBatchRequest(message)
+			if err == nil && len(req.Requests) > rpc.MaxBatchSize {
+				err = fmt.Errorf("batch too large: %d > %d", len(req.Requests), rpc.MaxBatchSize)
+			}
 			if err != nil {
 				proxy.log.Debug("bad client request", "error", err, "msg", rpc.FormatRawBody(string(message)))
 
@@ -269,24 +259,24 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 				continue
 			}
 
-			proxy.ClientConn.Write(rpc.SerializeResponse(rpcResponse))
+			proxy.writeResponse(rpcResponse)
 
 			// Flush any remaining responses
 			for i := 0; i < len(proxy.Responses); i++ {
-				proxy.ClientConn.Write(rpc.SerializeResponse(<-proxy.Responses))
+				proxy.writeResponse(<-proxy.Responses)
 			}
 		}
 	}
 }
 
 // DialAnyProvider dials any provider and returns a WebSocketProxy
-func (proxy *WebSocketProxy) DialAnyProvider(e *Endpoint, timing *servertiming.Header) (*Provider, error) {
+func (proxy *WebSocketProxy) DialAnyProvider(e *core.Endpoint, timing *servertiming.Header) (*core.Provider, error) {
 	for _, p := range e.Providers {
 		if p.Ws == "" {
 			continue
 		}
 
-		if !p.online {
+		if !p.IsOnline() {
 			continue
 		}
 
@@ -307,13 +297,11 @@ func (proxy *WebSocketProxy) DialAnyProvider(e *Endpoint, timing *servertiming.H
 
 		if err != nil {
 			// In a high traffic environment, the provider might be taken offline by another concurrent request
-			if p.online {
-				p.SetStatus(false, err)
+			if p.IsOnline() {
+				p.MarkUnhealthy(err)
 			}
 			continue
 		}
-
-		p.SetStatus(true, nil)
 
 		return p, nil
 	}
@@ -321,19 +309,22 @@ func (proxy *WebSocketProxy) DialAnyProvider(e *Endpoint, timing *servertiming.H
 	return nil, ErrNoProvidersAvailable
 }
 
-func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
+
+	if endpoint.AddXForwardedHeaders {
+		ctx = httpx.WithForwardedFor(ctx, r)
+	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		log:           slog.With("ip", r.RemoteAddr, "transport", "ws", "endpoint", endpoint.Name),
+		log:           endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
 		ctx:           ctx,
 		cancel:        cancel,
 		endpoint:      endpoint,
-		Responses:     make(chan *rpc.Response, 32),
-		Requests:      make(chan *rpc.Request, 32),
-		subscriptions: make(map[string]chan *rpc.Response),
+		Responses: make(chan *rpc.Response, 32),
+		Requests:  make(chan *rpc.Request, 32),
 	}
 
 	// Dial any provider before upgrading the websocket
@@ -357,15 +348,15 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 		return
 	}
 
+	// gorilla writes its own 101 handshake response and ignores w.Header(), so
+	// any headers we want the client to see must be passed to Upgrade.
+	respHeader := http.Header{}
+
 	if !endpoint.Public {
-		w.Header().Set("X-Provider", provider.Name)
+		respHeader.Set("X-Provider", provider.Name)
 	}
 
-	if endpoint.AddXForwardedHeaders {
-		addXfwdHeaders(r, w)
-	}
-
-	ws, err := upgrader.Upgrade(w, r, nil)
+	ws, err := upgrader.Upgrade(w, r, respHeader)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		proxy.log.Error("error upgrading connection", "error", err)
@@ -378,16 +369,20 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 	}()
 	metrics.RecordOpenConnection(endpoint.Name, provider.Name)
 
+	// Bound the size of incoming client messages. Set before NewClient starts
+	// the read pump. Upstream provider responses are intentionally not limited.
+	ws.SetReadLimit(rpc.MaxRequestBodySize)
+
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
 	proxy.log = proxy.log.With("provider", provider.Name)
-	proxy.log.Info("ws open", "client_version", provider.clientVersion, "request_time", time.Since(start))
+	proxy.log.Info("ws open", "client_version", provider.ClientVersion(), "request_time", time.Since(start))
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
-	t := time.NewTicker(1 * time.Minute)
+	t := time.NewTicker(PrimaryProviderCheckInterval)
 
 	for {
 		select {
@@ -395,7 +390,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *Endpoint, w http.Re
 		case <-t.C:
 			primaryProvider := endpoint.Providers[0]
 			// The primary provider has been online for more than 5 minutes
-			if provider != primaryProvider && primaryProvider.online && time.Since(primaryProvider.onlineAt) > 5*time.Minute {
+			if provider != primaryProvider && primaryProvider.IsOnline() && time.Since(primaryProvider.GetLastStateChange()) > PrimaryProviderAliveThreshold {
 				proxy.log.Info("primary provider is back online, closing connection")
 				proxy.ClientConn.Close(websocket.CloseServiceRestart, fmt.Errorf("primary provider is back online"))
 				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)

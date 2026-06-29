@@ -1,130 +1,25 @@
 package internal
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/chain"
+	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/metrics"
 	"github.com/wille/haprovider/internal/rpc"
 )
 
-var defaultClient = &http.Client{
-	Transport: &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     5 * time.Minute,
-	},
-}
+func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 
-func ProxyHTTP(ctx context.Context, endpoint *Endpoint, req *rpc.BatchRequest, timing *servertiming.Header) (*rpc.BatchResponse, *Provider, error) {
-	for _, provider := range endpoint.Providers {
-		if !provider.online {
-			continue
-		}
-
-		m := timing.NewMetric(provider.Name).Start()
-		res, err := SendHTTPRPCRequest(ctx, provider, req)
-		m.Stop()
-
-		// In case the request was closed before the provider connection was established
-		// return to not treat the error as a provider error
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		default:
-		}
-
-		if err != nil {
-			// In a high traffic environment, the provider might be taken offline by another concurrent request
-			if provider.online {
-				provider.SetStatus(false, err)
-			}
-			continue
-		}
-
-		provider.SetStatus(true, nil)
-
-		return res, provider, nil
-	}
-
-	return nil, nil, ErrNoProvidersAvailable
-}
-
-func SendHTTPRequest(ctx context.Context, provider *Provider, body []byte) ([]byte, error) {
-	url, _ := url.Parse(provider.Http)
-
-	ctx, cancel := context.WithTimeout(ctx, provider.GetTimeout())
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header = make(http.Header)
-
-	if provider.Headers != nil {
-		for k, v := range provider.Headers {
-			req.Header.Set(k, v)
-		}
-	}
-
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
-	resp, err := defaultClient.Do(req)
-
-	if err != nil {
-		return nil, err
-	}
-
-	b, err := io.ReadAll(resp.Body)
-
-	if err != nil {
-		return nil, err
-	}
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		break
-	case http.StatusTooManyRequests:
-		return nil, provider.HandleTooManyRequests(resp)
-	default:
-		return nil, fmt.Errorf("status code %d, %s", resp.StatusCode, rpc.FormatRawBody(string(b)))
-	}
-
-	return b, nil
-}
-
-func SendHTTPRPCRequest(ctx context.Context, p *Provider, req *rpc.BatchRequest) (*rpc.BatchResponse, error) {
-	body := rpc.SerializeBatchRequest(req)
-
-	b, err := SendHTTPRequest(ctx, p, body)
-	if err != nil {
-		return nil, err
-	}
-
-	response, err := rpc.DecodeBatchResponse(b)
-	if err != nil {
-		return nil, fmt.Errorf("bad response: %w, raw: %s", err, string(b))
-	}
-
-	return response, nil
-}
-
-func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
-	start := time.Now()
-
-	log := slog.With("ip", r.RemoteAddr, "transport", "http", "endpoint", endpoint.Name)
+	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http")
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
@@ -132,8 +27,16 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, rpc.MaxRequestBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			log.Error("http: request body too large", "limit", rpc.MaxRequestBodySize)
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
 		log.Error("http: error reading body", "error", err)
 		http.Error(w, "error reading body", http.StatusInternalServerError)
 		return
@@ -146,6 +49,12 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 		return
 	}
 
+	if len(req.Requests) > rpc.MaxBatchSize {
+		log.Error("batch too large", "batch_size", len(req.Requests), "max", rpc.MaxBatchSize)
+		http.Error(w, "batch too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	if req.IsBatch {
 		batchId := rpc.BatchIDCounter.Add(1)
 		log = log.With("batch_id", batchId, "batch_size", len(req.Requests))
@@ -153,92 +62,175 @@ func IncomingHttpHandler(ctx context.Context, endpoint *Endpoint, w http.Respons
 		log = log.With("rpc_id", req.Requests[0].GetID(), "method", req.Requests[0].Method)
 	}
 
-	res, provider, err := ProxyHTTP(ctx, endpoint, req, timing)
+	if endpoint.AddXForwardedHeaders {
+		ctx = httpx.WithForwardedFor(ctx, r)
+	}
 
-	if err != nil {
-		if provider != nil {
-			for _, req := range req.Requests {
-				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Method)
+NextProvider:
+	for _, provider := range endpoint.Providers {
+		if !provider.IsOnline() {
+			continue
+		}
+
+		start := time.Now()
+
+		m := timing.NewMetric(provider.Name).Start()
+		res, err := httpx.SendRPCBatchRequest(ctx, provider, req)
+		m.Stop()
+
+		// Client connection closed
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if err != nil {
+			// In a high traffic environment, the provider might be taken offline by another concurrent request
+			if provider.IsOnline() {
+				provider.MarkUnhealthy(err)
+			}
+
+			// Do not pass the failing method here as the whole request failed
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
+
+			continue NextProvider
+		}
+
+		log = log.With("provider", provider.Name, "request_time", time.Since(start))
+
+		if req.IsBatch {
+			log.Debug("batch request", "size", len(req.Requests))
+		} else {
+			log.Debug("request", "method", req.Requests[0].Method)
+		}
+
+		for _, res := range res.Responses {
+			if res.IsError() {
+				errorCode, errorMessage := res.GetError()
+				log.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+
+				err := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error())
+
+				if err != nil {
+					provider.MarkUnhealthy(err)
+					continue NextProvider
+				}
 			}
 		}
 
-		if err == ErrNoProvidersAvailable {
-			log.Error("no providers available")
-			http.Error(w, "no providers available", http.StatusServiceUnavailable)
+		if req.IsBatch && len(res.Responses) != len(req.Requests) {
+			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
+			continue NextProvider
+		}
+
+		if !endpoint.Public {
+			w.Header().Set("X-Provider", provider.Name)
+		}
+
+		out, err := rpc.SerializeBatchResponse(res)
+		if err != nil {
+			log.Error("error serializing response", "error", err)
+			http.Error(w, "error serializing response", http.StatusInternalServerError)
 			return
 		}
 
-		log.Error("error proxying request", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if _, err := w.Write(out); err != nil {
+			log.Error("error writing body", "error", err)
+		}
+
 		return
 	}
 
-	log = log.With("provider", provider.Name, "request_time", time.Since(start))
+	log.Error("no providers available")
 
-	for i, res := range req.Requests {
-		if req.IsBatch {
-			log.Debug("request", "batch_index", i, "rpc_id", res.GetID(), "method", res.Method)
-		} else {
-			// id and method is already set for this single request
-			log.Debug("request")
-		}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	if err := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); err != nil {
+		log.Error("error writing body", "error", err)
 	}
+}
 
-	didGoOffline := false
+// IncomingHTTPAPIHandler proxies a native TRON full-node HTTP API request (path,
+// method, query and body preserved) to an online provider, with provider
+// selection and failover. The path is forwarded under the provider's HTTP API
+// base (see HTTPAPIBase). This is TRON-specific: other chains proxy JSON-RPC.
+func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path string, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http", "path", path)
 
-	for i, res := range res.Responses {
-		method := req.Requests[i].Method
-
-		if res.IsError() {
-			log.Error("error", "error", res.Error)
-			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
-		} else {
-			metrics.RecordRequest(endpoint.Name, provider.Name, "http", method, time.Since(start).Seconds())
-		}
-
-		if !didGoOffline && res.IsError() {
-			errorCode, errorMessage := res.GetError()
-
-			// TODO: These errors are Ethereum specific. We should handle them in a more generic way.
-			switch errorCode {
-			case EthErrorRateLimited:
-				_ = provider.HandleTooManyRequests(nil)
-				provider.SetStatus(false, errorMessage)
-
-			case EthErrorInternalError:
-				provider.SetStatus(false, errorMessage)
-
-			default:
-				log.Warn("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", res.Error)
-				continue
-			}
-
-			// Only go offline once. We still want to return error responses to the client.
-			didGoOffline = true
-		}
-	}
-
-	if req.IsBatch {
-		if len(res.Responses) != len(req.Requests) {
-			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
-			http.Error(w, "batch response size mismatch", http.StatusInternalServerError)
+	r.Body = http.MaxBytesReader(w, r.Body, rpc.MaxRequestBodySize)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			log.Error("http: request body too large", "limit", rpc.MaxRequestBodySize)
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-	}
 
-	if !endpoint.Public {
-		w.Header().Set("X-Provider", provider.Name)
+		log.Error("http: error reading body", "error", err)
+		http.Error(w, "error reading body", http.StatusInternalServerError)
+		return
 	}
 
 	if endpoint.AddXForwardedHeaders {
-		addXfwdHeaders(r, w)
+		ctx = httpx.WithForwardedFor(ctx, r)
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	for _, provider := range endpoint.Providers {
+		if !provider.IsOnline() {
+			continue
+		}
 
-	_, err = w.Write(rpc.SerializeBatchResponse(res))
-	if err != nil {
-		log.Error("error writing body", "error", err)
+		t := strings.TrimSuffix(provider.Http, "/jsonrpc")
+
+		target := t + "/" + path
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+
+		m := timing.NewMetric(provider.Name).Start()
+		res, err := httpx.ForwardHTTPRequest(ctx, provider, r.Method, target, body, r.Header.Get("Content-Type"))
+		m.Stop()
+
+		log.Debug("forwarded http request", "target", target, "method", r.Method, "body", string(body), "content_type", r.Header.Get("Content-Type"))
+
+		// Client connection closed
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if err != nil {
+			// In a high traffic environment, the provider might be taken offline by another concurrent request
+			if provider.IsOnline() {
+				provider.MarkUnhealthy(err)
+			}
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", path)
+			log.Error("error proxying request", "error", err)
+			continue
+		}
+
+		metrics.RecordRequest(endpoint.Name, provider.Name, "http", path, 0)
+
+		if !endpoint.Public {
+			w.Header().Set("X-Provider", provider.Name)
+		}
+		if res.ContentType != "" {
+			w.Header().Set("Content-Type", res.ContentType)
+		}
+		w.WriteHeader(res.StatusCode)
+		if _, err := w.Write(res.Body); err != nil {
+			log.Error("error writing body", "error", err)
+		}
+
 		return
 	}
+
+	log.Error("no providers available")
+	http.Error(w, "no providers available", http.StatusServiceUnavailable)
 }

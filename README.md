@@ -1,11 +1,24 @@
 # haprovider
 
-[![Go Report Card](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
+[![Release](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/wille/haprovider/commit.yml?branch=master&style=flat-square)](https://github.com/wille/haprovider/actions)
+[![Go Reference](https://img.shields.io/badge/go.dev-reference-blue?style=flat-square&logo=go)](https://pkg.go.dev/github.com/wille/haprovider)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wille/haprovider?style=flat-square)](https://goreportcard.com/report/github.com/wille/haprovider)
-[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg?style=flat-square)](https://www.repostatus.org/#active)
-[![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/wille/haprovider?logo=go&style=flat-square)](https://go.dev)
+[![License: MIT](https://img.shields.io/github/license/wille/haprovider?style=flat-square)](LICENSE)
+[![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg?style=flat-square)](https://www.repostatus.org/#active)
 
-*High Availability Provider* is a load balancer for Ethereum and Solana JSON-RPC nodes, designed to provide reliable and 24/7 uninterrupted access to blockchains.
+*High Availability Provider* is a load balancer for Ethereum (and EVM L2s), Solana, Tron and Bitcoin JSON-RPC nodes — put one stable endpoint in front of your own nodes **and** providers like Infura/QuickNode/Alchemy, and haprovider health-checks each one and fails over automatically. No more single points of failure, rate-limit outages, or serving stale data from a node that has fallen behind the chain.
+
+```mermaid
+flowchart LR
+    C[dApp / client] -->|"JSON-RPC / WebSocket"| HA(haprovider)
+    HA --> P1[Your node]
+    HA --> P2[Infura / QuickNode]
+    HA --> P3[Public RPC]
+    HA -. "fails over on error, rate-limit (429 / -32005), or block-lag" .-> P2
+```
+
+Providers are tried in priority order; an unhealthy one is taken out of rotation and re-checked in the background until it recovers.
 
 ### Reasons for using haprovider
 
@@ -18,6 +31,7 @@
 
 ## Table of Contents
 - [Features](#features)
+- [How it compares](#how-it-compares)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
@@ -40,8 +54,6 @@
 
 - Response caching
 - Transaction broadcasts to multiple nodes
-- Fetching transactions from any node that has the transaction in the mempool
-- Cross checking account balances
 
 ## Installation
 
@@ -63,7 +75,7 @@ docker pull ghcr.io/wille/haprovider
 endpoints:
   ethereum:
     kind: eth
-    chainId: 1
+    chainId: "1"
     providers:
       - name: Local node
         http: http://localhost:8145
@@ -106,7 +118,7 @@ log_json: false  # Enable JSON logging
 endpoints:
   ethereum:
     kind: eth
-    chainId: 1
+    chainId: "1"
     providers:
       - name: Local node
         http: http://localhost:8145
@@ -125,23 +137,27 @@ endpoints:
 ### Configuration Options
 
 - `port`: HTTP/WS server port (default: 8080)
-- `metrics_tab`: Prometheus port (default: none) 
+- `metrics_port`: Prometheus port (default: none)
+- `healthcheck_interval`: How often each provider is health-checked (e.g. `10s`, `1m`) (default: 30s)
 - `log_level`: Logging level (debug, info, warn, error)
 - `log_json`: Enable JSON logs
 - `endpoints`: Map of endpoint configurations
-  - `kind`: Provider type (eth, solana) (default: solana)
-  - `chainId`: Network chain ID (optional, Ethereum only)
+  - `kind`: Chain type (eth, solana, tron, btc) (default: eth)
+  - `chainId`: Network chain ID (optional, EVM chains)
+  - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
+  - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)
+  - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false)
+  - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `providers`: List of provider configurations
     - `name`: Provider identifier
     - `http`: HTTP endpoint URL (required)
     - `ws`: WebSocket endpoint URL (optional)
     - `timeout`: Request timeout (optional, default 10s)
-    - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false)
-    - `add_xfwd_headers` Add X-Forwarded-For to upstream requests (optional)
+
 
 ### Command Line Options
 
-- `--config`: Path to config file (default: config.yml) ($HA_CONFIG_FILE or raw yml with $HA_CONFIG)
+- `--config`: Path to config file (default: config.yml). Raw config YAML can be provided via $HA_CONFIG
 - `--port`: HTTP/WS server address (default: :8080) ($HA_PORT)
 - `--metrics-port`: Prometheus port (default: none) ($HA_METRICS_PORT)
 - `--log-level`: Logging level (debug, info, warn, error) (default: info) ($HA_LOG_LEVEL)
@@ -158,7 +174,7 @@ endpoints:
 endpoints:
   ethereum:
     kind: eth
-    chainId: 1
+    chainId: "1"
     providers:
       - name: Local node
         http: http://localhost:8145
@@ -195,7 +211,7 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_provider_health`: Provider health status
 - `haprovider_provider_errors_total`: Total provider errors
 
-Enable metrics with configuration option `metrics_port: 127.0.0.1:8080`
+Enable metrics with configuration option `metrics_port: 127.0.0.1:9090`
 
 ## Contributing
 

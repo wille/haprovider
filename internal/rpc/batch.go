@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+// MaxBatchSize is the maximum number of requests allowed in a single batch.
+const MaxBatchSize = 100
+
+// MaxRequestBodySize is the maximum size in bytes of an incoming client request
+// (HTTP body or WebSocket message). 5 MB matches go-ethereum's HTTP RPC limit.
+// This bounds client input only; upstream provider responses are not limited.
+const MaxRequestBodySize = 5 * 1024 * 1024
+
 type BatchResponse struct {
 	Responses []*Response
 	IsBatch   bool
@@ -58,6 +66,15 @@ func (r BatchResponse) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(r.Responses)
+}
+
+func (r *BatchResponse) GetResponseByID(id string) *Response {
+	for _, r := range r.Responses {
+		if r.GetID() == id {
+			return r
+		}
+	}
+	return nil
 }
 
 type BatchRequest struct {
@@ -133,18 +150,10 @@ func DecodeBatchResponse(b []byte) (*BatchResponse, error) {
 	return &batch, nil
 }
 
-func SerializeBatchRequest(req *BatchRequest) []byte {
-	b, err := json.Marshal(req)
-	if err != nil {
-		panic(err)
-	}
-	return b
+func SerializeBatchRequest(req *BatchRequest) ([]byte, error) {
+	return json.Marshal(req)
 }
 
-func SerializeBatchResponse(res *BatchResponse) []byte {
-	b, err := json.Marshal(res)
-	if err != nil {
-		panic(err)
-	}
-	return b
+func SerializeBatchResponse(res *BatchResponse) ([]byte, error) {
+	return json.Marshal(res)
 }

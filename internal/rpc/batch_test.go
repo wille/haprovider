@@ -17,7 +17,10 @@ func TestNoBatchRequest(t *testing.T) {
 		t.Fatalf("single request IsBatch=true")
 	}
 
-	b := SerializeBatchRequest(&req)
+	b, err := SerializeBatchRequest(&req)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 	if b[0] != '{' {
 		t.Fatalf("expected single request to be serialized as a single object")
 	}
@@ -38,7 +41,10 @@ func TestBatchRequest(t *testing.T) {
 		t.Fatalf("expected 2 requests, got %d", len(req.Requests))
 	}
 
-	b := SerializeBatchRequest(&req)
+	b, err := SerializeBatchRequest(&req)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 	if b[0] != '[' {
 		t.Fatalf("expected batch request to be serialized as an array")
 	}
@@ -55,7 +61,10 @@ func TestNoBatchResponse(t *testing.T) {
 		t.Fatalf("single response IsBatch=true")
 	}
 
-	b := SerializeBatchResponse(&res)
+	b, err := SerializeBatchResponse(&res)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 	if b[0] != '{' {
 		t.Fatalf("expected single response to be serialized as a single object")
 	}
@@ -72,7 +81,10 @@ func TestBatchResponse(t *testing.T) {
 		t.Fatalf("batch response IsBatch=false")
 	}
 
-	b := SerializeBatchResponse(&res)
+	b, err := SerializeBatchResponse(&res)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 	if b[0] != '[' {
 		t.Fatalf("expected batch response to be serialized as an array")
 	}

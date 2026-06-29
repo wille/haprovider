@@ -8,17 +8,17 @@ import (
 func TestResponseMarshal_ErrorResponseOmitsResultMethodParams(t *testing.T) {
 	res := &Response{
 		Version: "2.0",
-		ID:      1,
+		ID:      ID("1"),
 		Result:  nil,
 		Method:  "",
 		Params:  nil,
-		Error: map[string]any{
-			"code":    float64(-32601),
-			"message": "the method does not exist/is not available",
-		},
+		Error:  NewError(-32601, "the method does not exist/is not available"),
 	}
 
-	b := SerializeResponse(res)
+	b, err := SerializeResponse(res)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -43,13 +43,13 @@ func TestResponseMarshal_NotificationOmitsResult(t *testing.T) {
 	res := &Response{
 		Version: "2.0",
 		Method:  "eth_subscription",
-		Params: map[string]any{
-			"subscription": "0x1",
-			"result":       map[string]any{"foo": "bar"},
-		},
+		Params:  json.RawMessage(`{"subscription":"0x1","result":{"foo":"bar"}}`),
 	}
 
-	b := SerializeResponse(res)
+	b, err := SerializeResponse(res)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -67,11 +67,14 @@ func TestResponseMarshal_NotificationOmitsResult(t *testing.T) {
 func TestResponseMarshal_SuccessResponseIncludesNullResult(t *testing.T) {
 	res := &Response{
 		Version: "2.0",
-		ID:      1,
+		ID:      ID("1"),
 		Result:  nil,
 	}
 
-	b := SerializeResponse(res)
+	b, err := SerializeResponse(res)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {

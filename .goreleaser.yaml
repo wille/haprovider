@@ -21,7 +21,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X github.com/wille/haprovider/internal.Version={{.Version}}
+      - -s -w -X github.com/wille/haprovider/internal/httpx.Version={{.Version}}
 
 archives:
   - id: haprovider
@@ -38,8 +38,7 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
     files:
       - README.md
-      - src: config.yml
-        dst: config.example.yml
+      - config.example.yml
 
 checksum:
   name_template: "checksums.txt"

@@ -3,19 +3,24 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
 	servertiming "github.com/mitchellh/go-server-timing"
 	"github.com/wille/haprovider/internal"
+	"github.com/wille/haprovider/internal/healthcheck"
+	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/metrics"
+	"github.com/wille/haprovider/internal/ws"
+	"golang.org/x/term"
 )
 
 // Incoming requests
@@ -29,19 +34,32 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 
 	endpoint := config.Endpoints[id]
 
-	w.Header().Set("Server", "haprovider/"+internal.Version)
+	w.Header().Set("Server", "haprovider/"+httpx.Version)
 
 	if endpoint == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	if r.Header.Get("Upgrade") == "websocket" {
-		internal.IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
+	// A trailing path (e.g. /tron/wallet/getnowblock) is a native HTTP API
+	// request that we forward verbatim to the provider. Only chains that expose
+	// a path-based HTTP API support this.
+	if path := r.PathValue("path"); path != "" {
+		if endpoint.Kind != "tron" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		internal.IncomingHTTPAPIHandler(ctx, endpoint, path, w, r, timing)
 		return
 	}
 
-	internal.IncomingHttpHandler(ctx, endpoint, w, r, timing)
+	if r.Header.Get("Upgrade") == "websocket" {
+		ws.IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
+		return
+	}
+
+	internal.IncomingHttpRpcHandler(ctx, endpoint, w, r, timing)
 }
 
 var config *internal.Config
@@ -57,7 +75,7 @@ const (
 )
 
 func main() {
-	var configFile = flag.String("config", DefaultConfigFile, "config file ($HA_CONFIGFILE) (Raw config can be provided via $HA_CONFIG)")
+	var configFile = flag.String("config", DefaultConfigFile, "config file (raw config YAML can be provided via $HA_CONFIG)")
 	var port = flag.String("port", DefaultPort, "http service port ($HA_PORT)")
 	var metricsPort = flag.String("metrics-port", DefaultMetricsPort, "metrics port ($HA_METRICS_PORT). Leave empty to disable.")
 	var logLevel = flag.String("log-level", DefaultLogLevel, "logging level (debug, info, warn, error) ($HA_LOG_LEVEL)")
@@ -141,92 +159,78 @@ func main() {
 			Level: level,
 		})))
 	} else {
-		slog.SetLogLoggerLevel(level)
+		// Human-friendly colored console output. Colors are disabled automatically
+		// when stdout isn't a terminal (e.g. piped to a file or log collector).
+		slog.SetDefault(slog.New(tint.NewHandler(os.Stdout, &tint.Options{
+			Level:      level,
+			TimeFormat: time.TimeOnly,
+			NoColor:    !term.IsTerminal(int(os.Stdout.Fd())),
+		})))
 	}
 
-	for endpointName, endpoint := range config.Endpoints {
-		switch endpoint.Kind {
-		case "", "eth":
-			endpoint.Kind = "eth"
-		case "solana", "btc":
-		default:
-			log.Fatalf("Unknown endpoint kind %s", endpoint.Kind)
-		}
-
-		if endpoint.Name == "" {
-			endpoint.Name = endpointName
-		}
-
-		for _, provider := range endpoint.Providers {
-			provider.EndpointName = endpoint.Name
-			if provider.Ws != "" {
-				url, err := url.Parse(provider.Ws)
-
-				if err != nil || url.Scheme == "http" || url.Scheme == "https" {
-					log.Fatalf("Invalid Websocket URL: %s", provider.Ws)
-				}
-			}
-			if provider.Http != "" {
-				url, err := url.Parse(provider.Http)
-
-				if err != nil || url.Scheme == "ws" || url.Scheme == "wss" {
-					log.Fatalf("Invalid HTTP URL: %s", provider.Http)
-				}
-			}
-
-			if provider.Http == "" && provider.Ws == "" {
-				log.Fatalf("Provider %s has no HTTP or WS endpoint", endpointName)
-			}
-		}
-	}
-
-	slog.Info("starting haprovider", "version", internal.Version)
+	slog.Info("starting haprovider", "version", httpx.Version, "healthcheck_interval", parsedHealthcheckInterval.String())
 
 	var wg sync.WaitGroup
 
 	total := 0
 	online := 0
 
-	for name, endpoint := range config.Endpoints {
+	for _, endpoint := range config.Endpoints {
 		for _, provider := range endpoint.Providers {
-			if provider.Http != "" {
-				slog.Info("connecting to", "provider", name, "endpoint", provider.Name, "http", provider.Http)
+			provider.Logger().Info("connecting to", "http", provider.Http)
 
-				wg.Add(1)
-				go func() {
-					total++
+			wg.Add(1)
+			go func() {
+				total++
 
-					err := endpoint.HTTPHealthcheck(provider)
+				start := time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := healthcheck.Run(ctx, provider)
+				cancel()
+				took := time.Since(start)
 
-					if err == nil {
-						online++
-					}
+				if err == nil {
+					online++
+					provider.MarkHealthy(took)
+				} else {
+					provider.MarkUnhealthy(err)
+					provider.Logger().Error("provider failed", "error", err)
+				}
 
-					wg.Done()
-
-					c := time.NewTicker(parsedHealthcheckInterval)
-					for range c.C {
-						_ = endpoint.HTTPHealthcheck(provider)
-					}
-				}()
-			} else if provider.Ws != "" {
-				// No initial healthcheck on websocket-only providers yet
-				slog.Warn("no http endpoint for provider. skipping healthcheck", "provider", name, "endpoint", provider.Name)
-				provider.SetStatus(true, nil)
-			}
+				wg.Done()
+			}()
 		}
 	}
 
 	wg.Wait()
 
+	for _, endpoint := range config.Endpoints {
+		for _, provider := range endpoint.Providers {
+			go func() {
+				time.Sleep(parsedHealthcheckInterval)
+				healthcheck.Worker(provider, parsedHealthcheckInterval)
+			}()
+		}
+	}
+
 	// Main application server
 	mainMux := http.NewServeMux()
 	timingMiddleware := servertiming.Middleware(http.HandlerFunc(requestHandler), nil)
 	mainMux.Handle("/{id}", timingMiddleware)
+	mainMux.Handle("/{id}/{path...}", timingMiddleware)
 
 	mainServer := &http.Server{
 		Addr:    *port,
 		Handler: mainMux,
+		// ReadHeaderTimeout defeats Slowloris (slow-header) attacks. ReadTimeout
+		// and IdleTimeout bound slow bodies and idle keep-alives. WriteTimeout is
+		// intentionally left unset: this server also serves WebSocket upgrades,
+		// and a write deadline would abort long-lived streams. After gorilla
+		// hijacks the connection the http.Server deadlines no longer apply, and
+		// the WS pump manages its own write/pong deadlines.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Metrics server (optional)
@@ -236,8 +240,12 @@ func main() {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", metrics.MetricsHandler())
 		metricsServer = &http.Server{
-			Addr:    *metricsPort,
-			Handler: metricsMux,
+			Addr:              *metricsPort,
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 	}
 
@@ -247,7 +255,7 @@ func main() {
 	// Start metrics server (if enabled)
 	if metricsServer != nil {
 		go func() {
-			slog.Info("starting metrics server", "version", internal.Version, "addr", metricsServer.Addr)
+			slog.Info("starting metrics server", "version", httpx.Version, "addr", metricsServer.Addr)
 			if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
 				errCh <- err
 			}
@@ -255,7 +263,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("starting haprovider", "version", internal.Version, "addr", *port)
+		slog.Info(fmt.Sprintf("started. %d/%d providers connected", online, total), "version", httpx.Version, "addr", *port)
 		if err := mainServer.ListenAndServe(); err != http.ErrServerClosed {
 			errCh <- err
 		}

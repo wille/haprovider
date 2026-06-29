@@ -8,8 +8,8 @@ import (
 	"net/http"
 
 	"github.com/gorilla/websocket"
-	"github.com/wille/haprovider/internal"
 	"github.com/wille/haprovider/internal/rpc"
+	wsproxy "github.com/wille/haprovider/internal/ws"
 )
 
 var upgrader = websocket.Upgrader{
@@ -32,19 +32,16 @@ func handleRequest(body []byte) (*rpc.Response, error) {
 
 	switch req.Method {
 	case "web3_clientVersion":
-		resp.Result = "testserver"
+		resp.Result = json.RawMessage(`"testserver"`)
 		return resp, nil
 	case "eth_chainId":
-		resp.Result = "0x1"
+		resp.Result = json.RawMessage(`"0x1"`)
 		return resp, nil
 	case "eth_blockNumber":
-		resp.Result = "0x1"
+		resp.Result = json.RawMessage(`"0x1"`)
 		return resp, nil
 	case "ha_ratelimit":
-		resp.Error = map[string]any{
-			"code":    -32005,
-			"message": "Too many requests",
-		}
+		resp.Error = rpc.NewError(-32005, "Too many requests")
 		return resp, nil
 	}
 
@@ -67,7 +64,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, _ = w.Write(rpc.SerializeResponse(resp))
+		out, err := rpc.SerializeResponse(resp)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(out)
 
 		return
 	}
@@ -79,7 +81,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = ws.Close() }()
 
-	client := internal.NewClient(ws)
+	client := wsproxy.NewClient(ws)
 
 	fmt.Println("Client connected")
 
@@ -94,7 +96,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			client.Write(rpc.SerializeResponse(rs))
+			out, err := rpc.SerializeResponse(rs)
+			if err != nil {
+				fmt.Println("Error serializing response:", err)
+				return
+			}
+			client.Write(out)
 		}
 	}
 }
