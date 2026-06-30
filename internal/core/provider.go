@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wille/haprovider/internal/metrics"
 	"github.com/wille/haprovider/internal/rpc"
 )
 
@@ -94,6 +95,8 @@ func (p *Provider) MarkUnhealthy(err error) {
 		p.RateLimitedUntil = time.Now().Add(retryAfter)
 	}
 
+	metrics.RecordProviderHealth(p.Endpoint.Name, p.Name, false)
+
 	if !p.online {
 		p.attempt++
 
@@ -125,6 +128,8 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 	p.lastStateChange = time.Now()
 	p.attempt = 0
 	p.RateLimitedUntil = time.Time{}
+
+	metrics.RecordProviderHealth(p.Endpoint.Name, p.Name, true)
 
 	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.ChainID, "block_height", p.highestBlock, "took", took.String())
 

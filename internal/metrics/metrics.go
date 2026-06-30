@@ -60,6 +60,15 @@ var (
 		},
 		[]string{"endpoint", "provider", "transport", "method"},
 	)
+
+	// In-flight requests currently being processed
+	inflightRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "haprovider_inflight_requests",
+			Help: "Number of requests currently being processed",
+		},
+		[]string{"endpoint", "transport"},
+	)
 )
 
 // MetricsHandler returns an HTTP handler for the Prometheus metrics endpoint
@@ -70,7 +79,19 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(totalConnections)
 	prometheus.MustRegister(providerHealth)
 	prometheus.MustRegister(requestDuration)
+	prometheus.MustRegister(inflightRequests)
 	return promhttp.Handler()
+}
+
+// TrackInflight increments the in-flight gauge and returns a function that
+// decrements it again, intended to be deferred at the start of a handler:
+//
+//	defer metrics.TrackInflight(endpoint, "http")()
+func TrackInflight(endpoint, transport string) func() {
+	inflightRequests.WithLabelValues(endpoint, transport).Inc()
+	return func() {
+		inflightRequests.WithLabelValues(endpoint, transport).Dec()
+	}
 }
 
 // RecordRequest records metrics for a request

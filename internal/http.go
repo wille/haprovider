@@ -18,6 +18,7 @@ import (
 )
 
 func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+	defer metrics.TrackInflight(endpoint.Name, "http")()
 
 	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http")
 
@@ -105,6 +106,17 @@ NextProvider:
 			log.Debug("request", "method", req.Requests[0].Method)
 		}
 
+		// Record one metric per (sub-)request, labeled by method, like the WS path.
+		elapsed := time.Since(start).Seconds()
+		for i, sub := range res.Responses {
+			method := req.Requests[i].Method
+			if sub.IsError() {
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
+			} else {
+				metrics.RecordRequest(endpoint.Name, provider.Name, "http", method, elapsed)
+			}
+		}
+
 		for _, res := range res.Responses {
 			if res.IsError() {
 				errorCode, errorMessage := res.GetError()
@@ -159,6 +171,8 @@ NextProvider:
 // selection and failover. The path is forwarded under the provider's HTTP API
 // base (see HTTPAPIBase). This is TRON-specific: other chains proxy JSON-RPC.
 func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path string, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
+	defer metrics.TrackInflight(endpoint.Name, "http")()
+
 	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http", "path", path)
 
 	r.Body = http.MaxBytesReader(w, r.Body, rpc.MaxRequestBodySize)
@@ -192,6 +206,7 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 			target += "?" + r.URL.RawQuery
 		}
 
+		start := time.Now()
 		m := timing.NewMetric(provider.Name).Start()
 		res, err := httpx.ForwardHTTPRequest(ctx, provider, r.Method, target, body, r.Header.Get("Content-Type"))
 		m.Stop()
@@ -215,7 +230,7 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 			continue
 		}
 
-		metrics.RecordRequest(endpoint.Name, provider.Name, "http", path, 0)
+		metrics.RecordRequest(endpoint.Name, provider.Name, "http", path, time.Since(start).Seconds())
 
 		if !endpoint.Public {
 			w.Header().Set("X-Provider", provider.Name)

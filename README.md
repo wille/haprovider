@@ -223,12 +223,13 @@ endpoints:
 
 haprovider exposes Prometheus metrics for monitoring:
 
-- `haprovider_requests_total`: Total number of requests
-- `haprovider_failed_requests_total`: Failed requests
+- `haprovider_requests_total`: Total number of requests (labels: endpoint, provider, transport, method)
+- `haprovider_failed_requests_total`: Failed requests (labels: endpoint, provider, transport, method)
 - `haprovider_request_duration_seconds`: Request duration histogram
-- `haprovider_open_connections`: Open connections
-- `haprovider_provider_health`: Provider health status
-- `haprovider_provider_errors_total`: Total provider errors
+- `haprovider_inflight_requests`: Requests currently being processed (labels: endpoint, transport)
+- `haprovider_open_connections`: Currently open WebSocket connections
+- `haprovider_total_connections`: Total WebSocket connections established
+- `haprovider_provider_health`: Provider health status (1=healthy, 0=unhealthy)
 
 Enable metrics with configuration option `metrics_port: 127.0.0.1:9090`
 
