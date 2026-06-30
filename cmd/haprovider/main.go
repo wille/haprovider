@@ -55,6 +55,19 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Header.Get("Upgrade") == "websocket" {
+		hasWebsocketProvider := false
+		for _, provider := range endpoint.Providers {
+			if provider.Ws != "" {
+				hasWebsocketProvider = true
+				break
+			}
+		}
+
+		if !hasWebsocketProvider {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		ws.IncomingWebsocketHandler(ctx, endpoint, w, r, timing)
 		return
 	}
