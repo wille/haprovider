@@ -54,6 +54,9 @@ type WebSocketProxy struct {
 	endpoint *core.Endpoint
 	provider *core.Provider
 
+	// opened is the timestamp the client websocket connection was established.
+	opened time.Time
+
 	// ClientConn is the incoming client connection
 	ClientConn *Client
 
@@ -359,6 +362,8 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 		return
 	}
 
+	proxy.opened = time.Now()
+
 	defer func() {
 		metrics.RecordCloseConnection(endpoint.Name, provider.Name)
 	}()
@@ -404,12 +409,12 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 			return
 
 		case <-proxy.ClientConn.ctx.Done():
-			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx))
+			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %w", context.Cause(proxy.ClientConn.ctx)))
 			return
 
 		case <-proxy.ProviderConn.ctx.Done():
-			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx))
+			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened))
 			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %w", context.Cause(proxy.ProviderConn.ctx)))
 			return
 		}
