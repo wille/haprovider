@@ -1,6 +1,10 @@
 package core
 
-import "log/slog"
+import (
+	"fmt"
+	"log/slog"
+	"sync"
+)
 
 // DefaultMaxResponseSize bounds how large an upstream provider response may be
 // (HTTP body or WebSocket message) before we reject it, to protect the proxy
@@ -24,7 +28,8 @@ type Endpoint struct {
 	Name string `yaml:"name"`
 
 	// ChainID is the Ethereum/L2 chain ID we're expecting.
-	// If it's not matching we will refuse using the provider
+	// If it's not matching we will refuse using the provider.
+	// Guarded by mu; use SetChainID to mutate it concurrently.
 	ChainID string `yaml:"chainId"`
 
 	// Kind is the type of
@@ -44,6 +49,30 @@ type Endpoint struct {
 	// MaxResponseSize caps the size in bytes of an upstream provider response.
 	// Unset uses DefaultMaxResponseSize; 0 means unlimited.
 	MaxResponseSize *int64 `yaml:"max_response_size,omitempty"`
+
+	// mu guards ChainID, which is set/validated concurrently by per-provider
+	// healthcheck goroutines sharing this endpoint.
+	mu sync.Mutex
+}
+
+// SetChainID records the chain ID reported by a provider. The first provider to
+// report sets the endpoint's chain ID; any later provider reporting a different
+// chain ID is rejected with an error.
+func (e *Endpoint) SetChainID(chainID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.ChainID == "" {
+		e.ChainID = chainID
+		e.Logger().Info("chainId not configured, now using the first seen chainId", "chainId", chainID)
+		return nil
+	}
+
+	if e.ChainID != chainID {
+		return fmt.Errorf("chainId mismatch: received=%s, expected=%s", chainID, e.ChainID)
+	}
+
+	return nil
 }
 
 // Logger returns a structured logger tagged with the endpoint name.

@@ -31,10 +31,8 @@ func Run(ctx context.Context, p *core.Provider) error {
 
 	p.SetClientVersion(nodeInfo.ClientVersion)
 
-	if p.Endpoint.ChainID != "" {
-		if nodeInfo.ChainID != p.Endpoint.ChainID {
-			return fmt.Errorf("chainId mismatch: received=%s, expected=%s", nodeInfo.ChainID, p.Endpoint.ChainID)
-		}
+	if err := p.Endpoint.SetChainID(nodeInfo.ChainID); err != nil {
+		return err
 	}
 
 	blockLagTolerance := defaultBlockLagTolerance[p.Endpoint.Kind]
