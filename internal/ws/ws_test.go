@@ -339,3 +339,45 @@ func TestIncomingWebsocketHandler_UpstreamResponseTooLarge(t *testing.T) {
 	_, err := readUntilClose(c)
 	assert.True(t, websocket.IsCloseError(err, websocket.CloseTryAgainLater), "got: %v", err)
 }
+
+// TestClient_CloseConcurrent verifies Close is idempotent and never blocks when
+// called repeatedly and concurrently from multiple goroutines, even though the
+// writePump consumes only a single close frame. Run under -race, it also covers
+// the concurrent writes to the closed flag. Before the fix, the second send on
+// the unbuffered close channel would block forever and leak the goroutine.
+func TestClient_CloseConcurrent(t *testing.T) {
+	// A real connected websocket pair so NewClient's read/write pumps run.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsScheme(srv.URL), nil)
+	require.NoError(t, err)
+	client := NewClient(conn)
+
+	const n = 20
+	done := make(chan struct{}, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			client.Close(websocket.CloseNormalClosure, nil)
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close blocked: concurrent/repeated Close is not safe")
+		}
+	}
+}

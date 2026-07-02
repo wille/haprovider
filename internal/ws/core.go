@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,6 +21,9 @@ type Client struct {
 
 	close chan []byte
 
+	// mu guards closed, pingStart and Latency, which are touched by the
+	// readPump and writePump goroutines and by concurrent Close callers.
+	mu     sync.Mutex
 	closed bool
 
 	pingcnt int
@@ -63,14 +67,26 @@ func (c *Client) Write(data []byte) {
 	c.send <- data
 }
 
-// Close will gracefully close the connection with a close message
+// Close will gracefully close the connection with a close message. It is safe
+// to call concurrently and more than once; only the first call sends a close
+// frame, and the send never blocks if the writePump has already exited.
 func (c *Client) Close(closeCode int, cause error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
 	c.closed = true
+	c.mu.Unlock()
 
+	msg := websocket.FormatCloseMessage(closeCode, "")
 	if cause != nil {
-		c.close <- websocket.FormatCloseMessage(closeCode, cause.Error())
-	} else {
-		c.close <- websocket.FormatCloseMessage(closeCode, "")
+		msg = websocket.FormatCloseMessage(closeCode, cause.Error())
+	}
+
+	select {
+	case c.close <- msg:
+	case <-c.ctx.Done():
 	}
 
 	c.cancel(cause)
@@ -87,7 +103,9 @@ func (c *Client) readPump() {
 	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error {
 		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.mu.Lock()
 		c.Latency = time.Since(c.pingStart)
+		c.mu.Unlock()
 		return nil
 	})
 
@@ -120,7 +138,9 @@ func (c *Client) writePump() {
 
 			pingData := []byte("haprovider/" + strconv.Itoa(c.pingcnt))
 			c.pingcnt++
+			c.mu.Lock()
 			c.pingStart = time.Now()
+			c.mu.Unlock()
 
 			err := c.Conn.WriteMessage(websocket.PingMessage, pingData)
 			if err != nil {

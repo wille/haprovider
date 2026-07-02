@@ -75,6 +75,14 @@ func (e *Endpoint) SetChainID(chainID string) error {
 	return nil
 }
 
+// GetChainID returns the endpoint's chain ID, synchronized against concurrent
+// SetChainID calls from per-provider healthcheck goroutines.
+func (e *Endpoint) GetChainID() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ChainID
+}
+
 // Logger returns a structured logger tagged with the endpoint name.
 func (e *Endpoint) Logger() *slog.Logger {
 	return slog.With("endpoint", e.Name)

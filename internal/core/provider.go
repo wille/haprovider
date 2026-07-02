@@ -131,7 +131,9 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 
 	metrics.RecordProviderHealth(p.Endpoint.Name, p.Name, true)
 
-	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.ChainID, "block_height", p.highestBlock, "took", took.String())
+	// GetChainID takes the endpoint lock, not p.m, so calling it while we hold
+	// p.m is safe (lock order is always p.m -> Endpoint.mu, never the reverse).
+	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.GetChainID(), "block_height", p.highestBlock, "took", took.String())
 
 }
 

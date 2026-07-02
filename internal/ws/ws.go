@@ -121,6 +121,10 @@ func (proxy *WebSocketProxy) DialProvider(endpoint *core.Endpoint, provider *cor
 	proxy.ProviderConn = providerClient
 	proxy.provider = provider
 
+	// Tag the logger with the chosen provider before starting the pump goroutine
+	// that reads proxy.log; mutating it afterwards would race with the pump.
+	proxy.log = proxy.log.With("provider", provider.Name)
+
 	go proxy.pumpProvider(proxy.ProviderConn)
 
 	return nil
@@ -376,7 +380,6 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
-	proxy.log = proxy.log.With("provider", provider.Name)
 	proxy.log.Info("ws open", "client_version", provider.ClientVersion(), "request_time", time.Since(start))
 
 	interrupt := make(chan os.Signal, 1)
