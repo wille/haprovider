@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -33,6 +34,21 @@ type Client struct {
 
 	// Current latency of the connection
 	Latency time.Duration
+
+	// Counts of data messages (excluding ping/pong) received from and sent to
+	// the peer over the lifetime of the connection.
+	recvCount atomic.Uint64
+	sentCount atomic.Uint64
+}
+
+// MessagesReceived returns the number of data messages read from the peer.
+func (c *Client) MessagesReceived() uint64 {
+	return c.recvCount.Load()
+}
+
+// MessagesSent returns the number of data messages written to the peer.
+func (c *Client) MessagesSent() uint64 {
+	return c.sentCount.Load()
 }
 
 func NewClient(conn *websocket.Conn) *Client {
@@ -117,6 +133,7 @@ func (c *Client) readPump() {
 			return
 		}
 
+		c.recvCount.Add(1)
 		c.recv <- message
 	}
 }
@@ -160,6 +177,7 @@ func (c *Client) writePump() {
 				c.destroy(fmt.Errorf("write: %s", err))
 				return
 			}
+			c.sentCount.Add(1)
 
 			// Flush any pending queue of messages
 			for i := 0; i < len(c.send); i++ {
@@ -168,6 +186,7 @@ func (c *Client) writePump() {
 					c.destroy(fmt.Errorf("write: %s", err))
 					return
 				}
+				c.sentCount.Add(1)
 			}
 		}
 	}

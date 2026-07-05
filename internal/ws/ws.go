@@ -408,16 +408,19 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 
 		// We closed the connection
 		case <-proxy.ctx.Done():
-			proxy.log.Error("ws closed", "error", context.Cause(proxy.ctx))
+			proxy.log.Error("ws closed", "error", context.Cause(proxy.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
+				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
 			return
 
 		case <-proxy.ClientConn.ctx.Done():
-			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened))
+			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
+				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %w", context.Cause(proxy.ClientConn.ctx)))
 			return
 
 		case <-proxy.ProviderConn.ctx.Done():
-			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened))
+			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
+				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
 			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %w", context.Cause(proxy.ProviderConn.ctx)))
 			return
 		}

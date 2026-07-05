@@ -381,3 +381,49 @@ func TestClient_CloseConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestClient_MessageCounts verifies the client tracks data messages sent to and
+// received from the peer (and does not count ping/pong).
+func TestClient_MessageCounts(t *testing.T) {
+	const sendN = 3 // peer -> client (counted as received)
+	const writeN = 5 // client -> peer (counted as sent)
+
+	// The upstream sends sendN messages to the client, then drains whatever the
+	// client writes back so the write pump can flush.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for i := 0; i < sendN; i++ {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+				return
+			}
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsScheme(srv.URL), nil)
+	require.NoError(t, err)
+	client := NewClient(conn)
+	t.Cleanup(func() { client.destroy(nil) })
+
+	// Drain everything the peer sent so readPump advances its counter.
+	for i := 0; i < sendN; i++ {
+		<-client.Read()
+	}
+	for i := 0; i < writeN; i++ {
+		client.Write([]byte("world"))
+	}
+
+	assert.Eventually(t, func() bool {
+		return client.MessagesReceived() == sendN && client.MessagesSent() == writeN
+	}, 2*time.Second, 10*time.Millisecond,
+		"received=%d sent=%d", client.MessagesReceived(), client.MessagesSent())
+}
