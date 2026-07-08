@@ -78,6 +78,22 @@ func (p *WebSocketProxy) Close(reason error) {
 	p.cancel(reason)
 }
 
+// logClose logs a connection-close message with the fields common to every
+// close path: how long the connection was open and how many data messages the
+// client exchanged with us. err is omitted when nil.
+func (p *WebSocketProxy) logClose(level slog.Level, msg string, err error) {
+	attrs := []any{
+		"opened", p.opened,
+		"duration", time.Since(p.opened),
+		"received", p.ClientConn.MessagesReceived(),
+		"sent", p.ClientConn.MessagesSent(),
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	p.log.Log(context.Background(), level, msg, attrs...)
+}
+
 func (proxy *WebSocketProxy) DialProvider(endpoint *core.Endpoint, provider *core.Provider) error {
 	u, _ := url.Parse(provider.Ws)
 
@@ -394,7 +410,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 			primaryProvider := endpoint.Providers[0]
 			// The primary provider has been online for more than 5 minutes
 			if provider != primaryProvider && primaryProvider.IsOnline() && time.Since(primaryProvider.GetLastStateChange()) > PrimaryProviderAliveThreshold {
-				proxy.log.Info("primary provider is back online, closing connection")
+				proxy.logClose(slog.LevelInfo, "primary provider is back online, closing connection", nil)
 				proxy.ClientConn.Close(websocket.CloseServiceRestart, fmt.Errorf("primary provider is back online"))
 				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 				return
@@ -402,25 +418,23 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 
 		// Gracefully close the connection both ways
 		case <-interrupt:
+			proxy.logClose(slog.LevelInfo, "ws closed, shutting down", nil)
 			proxy.ClientConn.Close(websocket.CloseGoingAway, fmt.Errorf("haprovider shutting down"))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 			return
 
 		// We closed the connection
 		case <-proxy.ctx.Done():
-			proxy.log.Error("ws closed", "error", context.Cause(proxy.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
-				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
+			proxy.logClose(slog.LevelError, "ws closed", context.Cause(proxy.ctx))
 			return
 
 		case <-proxy.ClientConn.ctx.Done():
-			proxy.log.Info("client connection closed", "error", context.Cause(proxy.ClientConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
-				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
+			proxy.logClose(slog.LevelInfo, "client connection closed", context.Cause(proxy.ClientConn.ctx))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, fmt.Errorf("client connection closed: %w", context.Cause(proxy.ClientConn.ctx)))
 			return
 
 		case <-proxy.ProviderConn.ctx.Done():
-			proxy.log.Error("provider connection closed", "error", context.Cause(proxy.ProviderConn.ctx), "opened", proxy.opened, "duration", time.Since(proxy.opened),
-				"received", proxy.ClientConn.MessagesReceived(), "sent", proxy.ClientConn.MessagesSent())
+			proxy.logClose(slog.LevelError, "provider connection closed", context.Cause(proxy.ProviderConn.ctx))
 			proxy.ClientConn.Close(websocket.CloseTryAgainLater, fmt.Errorf("provider connection closed: %w", context.Cause(proxy.ProviderConn.ctx)))
 			return
 		}
