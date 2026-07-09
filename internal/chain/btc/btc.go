@@ -19,6 +19,27 @@ var genesisBlocks = map[string]string{
 
 type Chain struct{}
 
+// coalesceable is the allowlist of Bitcoin RPC methods that are safe to collapse
+// into a single upstream call. Anything not listed is not coalesced.
+var coalesceable = map[string]struct{}{
+	"getblock":          {},
+	"getblockhash":      {},
+	"getblockheader":    {},
+	"getblockcount":     {},
+	"getblockchaininfo": {},
+	"getrawtransaction": {},
+	"getnetworkinfo":    {},
+	"getmempoolinfo":    {},
+	"gettxout":          {},
+	"estimatesmartfee":  {},
+}
+
+// Coalesceable reports whether identical concurrent Bitcoin RPC calls may be deduplicated.
+func (c *Chain) Coalesceable(method string) bool {
+	_, ok := coalesceable[method]
+	return ok
+}
+
 type networkInfo struct {
 	Subversion string `json:"subversion"`
 }
