@@ -81,12 +81,17 @@ func (p *WebSocketProxy) Close(reason error) {
 // logClose logs a connection-close message with the fields common to every
 // close path: how long the connection was open and how many data messages the
 // client exchanged with us. err is omitted when nil.
+//
+// The counts are logged from the client's perspective: "sent" is what the
+// client sent us (requests, i.e. frames we read off the client socket) and
+// "received" is what the client received from us (responses we wrote to it).
+// This is why the getters look inverted relative to the labels.
 func (p *WebSocketProxy) logClose(level slog.Level, msg string, err error) {
 	attrs := []any{
 		"opened", p.opened,
 		"duration", time.Since(p.opened),
-		"received", p.ClientConn.MessagesReceived(),
-		"sent", p.ClientConn.MessagesSent(),
+		"sent", p.ClientConn.MessagesReceived(),
+		"received", p.ClientConn.MessagesSent(),
 	}
 	if err != nil {
 		attrs = append(attrs, "error", err)
