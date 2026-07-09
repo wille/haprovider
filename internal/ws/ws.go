@@ -89,7 +89,7 @@ func (p *WebSocketProxy) Close(reason error) {
 func (p *WebSocketProxy) logClose(level slog.Level, msg string, err error) {
 	attrs := []any{
 		"opened", p.opened,
-		"duration", time.Since(p.opened),
+		"duration", time.Since(p.opened).String(),
 		"sent", p.ClientConn.MessagesReceived(),
 		"received", p.ClientConn.MessagesSent(),
 	}
@@ -401,7 +401,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	proxy.ClientConn = NewClient(ws)
 	go proxy.pumpClient(proxy.ClientConn)
 
-	proxy.log.Info("ws open", "client_version", provider.ClientVersion(), "request_time", time.Since(start))
+	proxy.log.Info("ws open", "client_version", provider.ClientVersion(), "request_time", time.Since(start).String())
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)

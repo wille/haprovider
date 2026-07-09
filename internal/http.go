@@ -98,7 +98,7 @@ NextProvider:
 			continue NextProvider
 		}
 
-		log = log.With("provider", provider.Name, "request_time", time.Since(start))
+		log = log.With("provider", provider.Name, "request_time", time.Since(start).String())
 
 		if req.IsBatch {
 			log.Debug("batch request", "size", len(req.Requests))
