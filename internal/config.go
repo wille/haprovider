@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/wille/haprovider/internal/cache"
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
 	yaml "gopkg.in/yaml.v2"
@@ -55,6 +56,15 @@ func LoadConfig(configFile string) *Config {
 		}
 
 		if err := c.ValidateConfig(endpoint); err != nil {
+			panic(err)
+		}
+
+		// Attach an in-memory response cache to every endpoint by default.
+		var maxBytes int64
+		if endpoint.CacheMaxSizeMB != nil {
+			maxBytes = int64(*endpoint.CacheMaxSizeMB) * 1024 * 1024
+		}
+		if err := endpoint.InitCache(cache.NewMemory(maxBytes, 0)); err != nil {
 			panic(err)
 		}
 

@@ -69,6 +69,15 @@ var (
 		},
 		[]string{"endpoint", "transport"},
 	)
+
+	// Cache lookups, labeled by result (hit/miss).
+	cacheRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "haprovider_cache_requests_total",
+			Help: "Total number of cache lookups by result (hit/miss)",
+		},
+		[]string{"endpoint", "method", "result"},
+	)
 )
 
 // MetricsHandler returns an HTTP handler for the Prometheus metrics endpoint
@@ -80,7 +89,18 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(providerHealth)
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
+	prometheus.MustRegister(cacheRequests)
 	return promhttp.Handler()
+}
+
+// RecordCacheHit records a cache hit for a request.
+func RecordCacheHit(endpoint, method string) {
+	cacheRequests.WithLabelValues(endpoint, method, "hit").Inc()
+}
+
+// RecordCacheMiss records a cache miss for a request.
+func RecordCacheMiss(endpoint, method string) {
+	cacheRequests.WithLabelValues(endpoint, method, "miss").Inc()
 }
 
 // TrackInflight increments the in-flight gauge and returns a function that

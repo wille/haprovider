@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/cache"
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
@@ -67,6 +69,76 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		ctx = httpx.WithForwardedFor(ctx, r)
 	}
 
+	c := chain.New(endpoint.Kind)
+
+	// Cache plan: for each sub-request, serve cacheable hits from the cache and
+	// collect the rest (misses + non-cacheable) to forward upstream. This works
+	// for a single request and for every element of a batch independently.
+	cacheKeys := make([]string, len(req.Requests)) // "" = not cacheable, so not stored
+	responses := make([]*rpc.Response, len(req.Requests))
+	missIdx := make([]int, 0, len(req.Requests))
+
+	for i, sub := range req.Requests {
+		if endpoint.CacheEnabled() && c.Cacheable(sub.Method, sub.Params) {
+			key := cache.Key(sub.Method, sub.Params)
+			cacheKeys[i] = key
+			if val, ok, _ := endpoint.Cache().Get(ctx, key); ok {
+				metrics.RecordCacheHit(endpoint.Name, sub.Method)
+				responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Result: val}
+				continue
+			}
+			metrics.RecordCacheMiss(endpoint.Name, sub.Method)
+		}
+		missIdx = append(missIdx, i)
+	}
+
+	// Everything was a cache hit: answer without contacting a provider.
+	if len(missIdx) == 0 {
+		log.Debug("cache hit", "batch", req.IsBatch, "size", len(req.Requests))
+		if !endpoint.Public {
+			w.Header().Set("X-Cache", "HIT")
+		}
+		writeBatch(w, &rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch}, log)
+		return
+	}
+
+	// Forward only the misses upstream, preserving the original request shape.
+	miss := &rpc.BatchRequest{IsBatch: req.IsBatch, Requests: make([]*rpc.Request, len(missIdx))}
+	for j, idx := range missIdx {
+		miss.Requests[j] = req.Requests[idx]
+	}
+
+	res, provider, err := forwardBatch(ctx, endpoint, c, miss, timing, log)
+	if err != nil {
+		writeForwardError(w, err, log)
+		return
+	}
+
+	// Store fresh cacheable results and merge the upstream responses back into
+	// their original positions.
+	for j, idx := range missIdx {
+		sub := res.Responses[j]
+		responses[idx] = sub
+		if cacheKeys[idx] != "" && !sub.IsError() && c.CacheableResult(req.Requests[idx].Method, sub.Result) {
+			_ = endpoint.Cache().Set(ctx, cacheKeys[idx], sub.Result, endpoint.GetCacheTTL())
+		}
+	}
+
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
+	}
+	writeBatch(w, &rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch}, log)
+}
+
+// errNoProvidersAvailable is returned by forwardBatch when no online provider
+// could serve the request.
+var errNoProvidersAvailable = errors.New("no providers available")
+
+// forwardBatch runs the provider failover loop for req and returns the first
+// successful response and the provider that produced it. It records per-request
+// metrics and marks providers unhealthy on failure. It returns ctx.Err() if the
+// context is cancelled mid-flight, or errNoProvidersAvailable when exhausted.
+func forwardBatch(ctx context.Context, endpoint *core.Endpoint, c chain.Chain, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*rpc.BatchResponse, *core.Provider, error) {
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
@@ -82,7 +154,7 @@ NextProvider:
 		// Client connection closed
 		select {
 		case <-ctx.Done():
-			return
+			return nil, nil, ctx.Err()
 		default:
 		}
 
@@ -98,12 +170,12 @@ NextProvider:
 			continue NextProvider
 		}
 
-		log = log.With("provider", provider.Name, "request_time", time.Since(start).String())
-
-		if req.IsBatch {
-			log.Debug("batch request", "size", len(req.Requests))
-		} else {
-			log.Debug("request", "method", req.Requests[0].Method)
+		// A response must map one-to-one to the request; otherwise the merge back
+		// to the client is unsafe.
+		if len(res.Responses) != len(req.Requests) {
+			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
+			continue NextProvider
 		}
 
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
@@ -117,51 +189,58 @@ NextProvider:
 			}
 		}
 
-		for _, res := range res.Responses {
-			if res.IsError() {
-				errorCode, errorMessage := res.GetError()
+		for _, sub := range res.Responses {
+			if sub.IsError() {
+				errorCode, errorMessage := sub.GetError()
 				log.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
 
-				err := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error())
-
-				if err != nil {
-					provider.MarkUnhealthy(err)
+				if herr := c.HandleError(errorCode, errorMessage.Error()); herr != nil {
+					provider.MarkUnhealthy(herr)
 					continue NextProvider
 				}
 			}
 		}
 
-		if req.IsBatch && len(res.Responses) != len(req.Requests) {
-			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
-			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
-			continue NextProvider
-		}
+		log.With("provider", provider.Name, "request_time", time.Since(start).String()).Debug("forwarded")
+		return res, provider, nil
+	}
 
-		if !endpoint.Public {
-			w.Header().Set("X-Provider", provider.Name)
-		}
+	return nil, nil, errNoProvidersAvailable
+}
 
-		out, err := rpc.SerializeBatchResponse(res)
-		if err != nil {
-			log.Error("error serializing response", "error", err)
-			http.Error(w, "error serializing response", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-		if _, err := w.Write(out); err != nil {
-			log.Error("error writing body", "error", err)
-		}
-
+// writeForwardError writes the appropriate client response for a failover error.
+func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
+	// Client disconnected mid-flight: nothing left to write to.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 
-	log.Error("no providers available")
+	if errors.Is(err, errNoProvidersAvailable) {
+		log.Error("no providers available")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
+			log.Error("error writing body", "error", werr)
+		}
+		return
+	}
+
+	log.Error("request failed", "error", err)
+	http.Error(w, "request failed", http.StatusInternalServerError)
+}
+
+// writeBatch serializes and writes a batch response, setting the JSON content type.
+func writeBatch(w http.ResponseWriter, res *rpc.BatchResponse, log *slog.Logger) {
+	out, err := rpc.SerializeBatchResponse(res)
+	if err != nil {
+		log.Error("error serializing response", "error", err)
+		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	if err := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); err != nil {
+
+	if _, err := w.Write(out); err != nil {
 		log.Error("error writing body", "error", err)
 	}
 }

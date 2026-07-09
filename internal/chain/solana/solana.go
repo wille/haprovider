@@ -1,7 +1,9 @@
 package solana
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 
@@ -29,6 +31,29 @@ func (c *Chain) ValidateConfig(e *core.Endpoint) error {
 	}
 
 	return nil
+}
+
+// cacheable is the allowlist of Solana JSON-RPC methods whose responses may be
+// cached. Kept modest; note commitment levels (processed/confirmed/finalized) in
+// params can affect freshness, so a TTL bounds staleness.
+var cacheable = map[string]struct{}{
+	"getGenesisHash": {},
+	"getVersion":     {},
+	"getBlock":       {},
+	"getTransaction": {},
+	"getBlockTime":   {},
+}
+
+func (c *Chain) Cacheable(method string, _ json.RawMessage) bool {
+	_, ok := cacheable[method]
+	return ok
+}
+
+// CacheableResult caches any non-null, non-empty successful result (a null
+// result means the block/transaction was not found).
+func (c *Chain) CacheableResult(_ string, result json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(result)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func (c *Chain) HandleError(code int, message string) error {

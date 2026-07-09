@@ -2,6 +2,7 @@ package eth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -36,6 +37,14 @@ func (c *Ethereum) HandleError(code int, message string) error {
 	}
 
 	return nil
+}
+
+func (c *Ethereum) Cacheable(method string, params json.RawMessage) bool {
+	return Cacheable(method, params)
+}
+
+func (c *Ethereum) CacheableResult(method string, result json.RawMessage) bool {
+	return CacheableResult(method, result)
 }
 
 func (c Ethereum) ValidateConfig(e *core.Endpoint) error {

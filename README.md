@@ -44,12 +44,39 @@ Providers are tried in priority order; an unhealthy one is taken out of rotation
 - **Traffic Observability**: Monitor and analyze your RPC traffic patterns
 - **Request Validation**: Validates requests and responses to detect errors
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
+- **Response Caching**: Serves repeat reads of immutable data from an in-memory cache instead of the upstream
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
 
+### Response caching
+
+haprovider caches responses to read-only requests whose result does not change,
+so repeat calls (a block by hash, a mined transaction receipt, `eth_chainId`) are
+served locally instead of hitting a provider. This cuts upstream load and
+rate-limit (429) exposure. Caching works on both the HTTP and WebSocket paths and
+is enabled by default on every endpoint using an in-memory store.
+
+Only an allowlist of read-only methods per chain is cached, and only when the
+result is safe to reuse: requests referencing a mutable block tag
+(`latest`/`pending`/`safe`/`finalized`) are never cached, error and null results
+are never cached, and an unconfirmed `eth_getTransactionByHash` (null
+`blockNumber`) is skipped until it is mined. A per-entry TTL bounds reorg
+staleness; set `cache_ttl` per endpoint (a value of `0` disables caching for that
+endpoint). The `haprovider_cache_requests_total` metric tracks hits and misses.
+
+Batch requests are cached per element: cached members are served locally and only
+the uncached members are forwarded upstream, then the responses are merged back in
+order. A batch whose members are all cached is answered without contacting a
+provider.
+
+The default in-memory store is a bounded LRU: it is capped by both a total size
+budget (`cache_max_size_mb`, default 128 MB per endpoint) and an entry count, and
+evicts least-recently-used entries when either limit is reached. Individual
+responses larger than 5 MB are never cached (they pass through to the client), so
+one large payload cannot dominate the cache.
+
 ### *What haprovider doesn't do right now*
 
-- Response caching
 - Transaction broadcasts to multiple nodes
 
 ## Installation
@@ -164,6 +191,8 @@ endpoints:
   - `chainId`: Network chain ID (optional, EVM chains)
   - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)
+  - `cache_ttl`: How long cacheable responses are kept (e.g. `10s`, `1m`) (optional, default 10s, 0 = caching disabled)
+  - `cache_max_size_mb`: Total response-cache size budget in MB for this endpoint (optional, default 128)
   - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false)
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `providers`: List of provider configurations

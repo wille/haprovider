@@ -9,10 +9,12 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/cache"
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
@@ -70,6 +72,20 @@ type WebSocketProxy struct {
 	Responses chan *rpc.Response
 
 	badRequests int
+
+	// chain is the endpoint's chain implementation, used for cacheability checks.
+	chain chain.Chain
+
+	// pendingCache maps the JSON-RPC id of a forwarded cacheable request to the
+	// cache key/method to store its response under when it arrives. Written by
+	// pumpClient and read/cleared by pumpProvider, so guarded by cacheMu.
+	cacheMu      sync.Mutex
+	pendingCache map[string]pendingCacheEntry
+}
+
+type pendingCacheEntry struct {
+	key    string
+	method string
 }
 
 // Close destroys the proxy connection.
@@ -219,9 +235,60 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				}
 			}
 
+			proxy.maybeCacheResponse(rpcResponse)
 			proxy.Responses <- rpcResponse
 		}
 	}
+}
+
+// maybeCacheResponse stores a successful response for a previously-forwarded
+// cacheable request (tracked by id in pendingCache), if the chain deems the
+// result cacheable.
+func (proxy *WebSocketProxy) maybeCacheResponse(res *rpc.Response) {
+	if !proxy.endpoint.CacheEnabled() || res.IsError() {
+		return
+	}
+
+	id := res.GetID()
+	proxy.cacheMu.Lock()
+	entry, ok := proxy.pendingCache[id]
+	if ok {
+		delete(proxy.pendingCache, id)
+	}
+	proxy.cacheMu.Unlock()
+
+	if !ok {
+		return
+	}
+	if proxy.chain.CacheableResult(entry.method, res.Result) {
+		_ = proxy.endpoint.Cache().Set(proxy.ctx, entry.key, res.Result, proxy.endpoint.GetCacheTTL())
+	}
+}
+
+// serveFromCache serves req from cache if possible. It returns true when a cache
+// hit was queued to the client (the request must not be forwarded). On a
+// cacheable miss it records the pending id→key mapping so the eventual response
+// is stored, and returns false so the caller forwards the request.
+func (proxy *WebSocketProxy) serveFromCache(req *rpc.Request) bool {
+	if !proxy.endpoint.CacheEnabled() || !proxy.chain.Cacheable(req.Method, req.Params) {
+		return false
+	}
+
+	key := cache.Key(req.Method, req.Params)
+	if val, ok, _ := proxy.endpoint.Cache().Get(proxy.ctx, key); ok {
+		metrics.RecordCacheHit(proxy.endpoint.Name, req.Method)
+		// Write straight to the client rather than via proxy.Responses: this runs
+		// on the pumpClient goroutine, which is also the sole consumer of
+		// proxy.Responses, so sending there could deadlock on a full buffer.
+		proxy.writeResponse(&rpc.Response{Version: "2.0", ID: req.ID, Result: val})
+		return true
+	}
+
+	metrics.RecordCacheMiss(proxy.endpoint.Name, req.Method)
+	proxy.cacheMu.Lock()
+	proxy.pendingCache[req.ID.String()] = pendingCacheEntry{key: key, method: req.Method}
+	proxy.cacheMu.Unlock()
+	return false
 }
 
 func (proxy *WebSocketProxy) pumpClient(client *Client) {
@@ -267,6 +334,12 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			// Break up any batched requests into one request per message
 			for i, r := range req.Requests {
+				// Serve from cache when possible; otherwise forward upstream.
+				if proxy.serveFromCache(r) {
+					requestLog.With("rpc_id", r.GetID(), "method", r.Method).Debug("cache hit")
+					continue
+				}
+
 				proxy.Requests <- r
 
 				if req.IsBatch {
@@ -342,12 +415,14 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		log:           endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
-		ctx:           ctx,
-		cancel:        cancel,
-		endpoint:      endpoint,
-		Responses: make(chan *rpc.Response, 32),
-		Requests:  make(chan *rpc.Request, 32),
+		log:          endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
+		ctx:          ctx,
+		cancel:       cancel,
+		endpoint:     endpoint,
+		Responses:    make(chan *rpc.Response, 32),
+		Requests:     make(chan *rpc.Request, 32),
+		chain:        chain.New(endpoint.Kind),
+		pendingCache: make(map[string]pendingCacheEntry),
 	}
 
 	// Dial any provider before upgrading the websocket
