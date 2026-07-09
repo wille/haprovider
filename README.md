@@ -1,7 +1,6 @@
 # haprovider
 
 [![Release](https://img.shields.io/github/v/release/wille/haprovider?style=flat-square)](https://github.com/wille/haprovider/releases)
-[![Go Report Card](https://goreportcard.com/badge/github.com/wille/haprovider?style=flat-square)](https://goreportcard.com/report/github.com/wille/haprovider)
 [![License: MIT](https://img.shields.io/github/license/wille/haprovider?style=flat-square)](LICENSE)
 [![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg?style=flat-square)](https://www.repostatus.org/#active)
 
