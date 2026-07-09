@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestCacheable(t *testing.T) {
+func TestCacheableRequest(t *testing.T) {
 	c := &Chain{}
 	for method, want := range map[string]bool{
 		"getblock":           true,
@@ -14,18 +14,18 @@ func TestCacheable(t *testing.T) {
 		"getrawtransaction":  false,
 		"sendrawtransaction": false,
 	} {
-		if got := c.Cacheable(method, nil); got != want {
-			t.Errorf("Cacheable(%q) = %v, want %v", method, got, want)
+		if got := c.CacheableRequest(method, nil); got != want {
+			t.Errorf("CacheableRequest(%q) = %v, want %v", method, got, want)
 		}
 	}
 }
 
-func TestCacheableResult(t *testing.T) {
+func TestCacheableResponse(t *testing.T) {
 	c := &Chain{}
-	if c.CacheableResult("getblock", json.RawMessage(`null`)) {
+	if c.CacheableResponse("getblock", json.RawMessage(`null`)) {
 		t.Error("null result must not be cacheable")
 	}
-	if !c.CacheableResult("getblock", json.RawMessage(`{"hash":"x"}`)) {
+	if !c.CacheableResponse("getblock", json.RawMessage(`{"hash":"x"}`)) {
 		t.Error("non-null result should be cacheable")
 	}
 }

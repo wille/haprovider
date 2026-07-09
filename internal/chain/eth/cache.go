@@ -28,11 +28,11 @@ var cacheable = map[string]struct{}{
 // response for a request referencing one must not be cached.
 var mutableBlockTags = []string{"latest", "pending", "safe", "finalized"}
 
-// Cacheable reports whether an EVM JSON-RPC request (method + params) may be
+// CacheableRequest reports whether an EVM JSON-RPC request (method + params) may be
 // cached: the method must be on the allowlist and the params must not reference
 // a mutable block tag (latest/pending/safe/finalized). The tag check is
 // conservative: a false positive only costs a missed cache, never a stale answer.
-func Cacheable(method string, params json.RawMessage) bool {
+func CacheableRequest(method string, params json.RawMessage) bool {
 	if _, ok := cacheable[method]; !ok {
 		return false
 	}
@@ -45,12 +45,12 @@ func Cacheable(method string, params json.RawMessage) bool {
 	return true
 }
 
-// CacheableResult reports whether a specific successful result may be stored.
+// CacheableResponse reports whether a specific successful result may be stored.
 // Never caches a null/empty result (a missing block/tx or absent receipt). For
 // eth_getTransactionByHash it additionally requires the transaction to be
 // confirmed (non-null blockNumber): a pending transaction's response is not yet
 // immutable and would otherwise be cached with a null blockNumber.
-func CacheableResult(method string, result json.RawMessage) bool {
+func CacheableResponse(method string, result json.RawMessage) bool {
 	if isNullResult(result) {
 		return false
 	}

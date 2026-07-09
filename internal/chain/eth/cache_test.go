@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestCacheable(t *testing.T) {
+func TestCacheableRequest(t *testing.T) {
 	cases := []struct {
 		method string
 		params string
@@ -28,35 +28,35 @@ func TestCacheable(t *testing.T) {
 	}
 	c := &Ethereum{}
 	for _, tc := range cases {
-		if got := c.Cacheable(tc.method, json.RawMessage(tc.params)); got != tc.want {
-			t.Errorf("Cacheable(%q, %s) = %v, want %v", tc.method, tc.params, got, tc.want)
+		if got := c.CacheableRequest(tc.method, json.RawMessage(tc.params)); got != tc.want {
+			t.Errorf("CacheableRequest(%q, %s) = %v, want %v", tc.method, tc.params, got, tc.want)
 		}
 	}
 }
 
-func TestCacheableResult(t *testing.T) {
+func TestCacheableResponse(t *testing.T) {
 	c := &Ethereum{}
 
 	// null / empty results are never cached.
-	if c.CacheableResult("eth_getTransactionReceipt", json.RawMessage(`null`)) {
+	if c.CacheableResponse("eth_getTransactionReceipt", json.RawMessage(`null`)) {
 		t.Error("null result must not be cacheable")
 	}
-	if c.CacheableResult("eth_getBlockByHash", json.RawMessage(``)) {
+	if c.CacheableResponse("eth_getBlockByHash", json.RawMessage(``)) {
 		t.Error("empty result must not be cacheable")
 	}
 
 	// A non-null receipt (implies mined) is cacheable.
-	if !c.CacheableResult("eth_getTransactionReceipt", json.RawMessage(`{"status":"0x1"}`)) {
+	if !c.CacheableResponse("eth_getTransactionReceipt", json.RawMessage(`{"status":"0x1"}`)) {
 		t.Error("non-null receipt should be cacheable")
 	}
 
 	// eth_getTransactionByHash: pending (null blockNumber) not cacheable; confirmed is.
 	pending := json.RawMessage(`{"hash":"0xabc","blockNumber":null}`)
-	if c.CacheableResult("eth_getTransactionByHash", pending) {
+	if c.CacheableResponse("eth_getTransactionByHash", pending) {
 		t.Error("pending transaction (null blockNumber) must not be cacheable")
 	}
 	confirmed := json.RawMessage(`{"hash":"0xabc","blockNumber":"0x10"}`)
-	if !c.CacheableResult("eth_getTransactionByHash", confirmed) {
+	if !c.CacheableResponse("eth_getTransactionByHash", confirmed) {
 		t.Error("confirmed transaction should be cacheable")
 	}
 }

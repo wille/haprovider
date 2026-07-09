@@ -39,12 +39,12 @@ func (c *Ethereum) HandleError(code int, message string) error {
 	return nil
 }
 
-func (c *Ethereum) Cacheable(method string, params json.RawMessage) bool {
-	return Cacheable(method, params)
+func (c *Ethereum) CacheableRequest(method string, params json.RawMessage) bool {
+	return CacheableRequest(method, params)
 }
 
-func (c *Ethereum) CacheableResult(method string, result json.RawMessage) bool {
-	return CacheableResult(method, result)
+func (c *Ethereum) CacheableResponse(method string, result json.RawMessage) bool {
+	return CacheableResponse(method, result)
 }
 
 func (c Ethereum) ValidateConfig(e *core.Endpoint) error {

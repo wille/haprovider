@@ -260,7 +260,7 @@ func (proxy *WebSocketProxy) maybeCacheResponse(res *rpc.Response) {
 	if !ok {
 		return
 	}
-	if proxy.chain.CacheableResult(entry.method, res.Result) {
+	if proxy.chain.CacheableResponse(entry.method, res.Result) {
 		_ = proxy.endpoint.Cache().Set(proxy.ctx, entry.key, res.Result, proxy.endpoint.GetCacheTTL())
 	}
 }
@@ -270,7 +270,7 @@ func (proxy *WebSocketProxy) maybeCacheResponse(res *rpc.Response) {
 // cacheable miss it records the pending id→key mapping so the eventual response
 // is stored, and returns false so the caller forwards the request.
 func (proxy *WebSocketProxy) serveFromCache(req *rpc.Request) bool {
-	if !proxy.endpoint.CacheEnabled() || !proxy.chain.Cacheable(req.Method, req.Params) {
+	if !proxy.endpoint.CacheEnabled() || !proxy.chain.CacheableRequest(req.Method, req.Params) {
 		return false
 	}
 

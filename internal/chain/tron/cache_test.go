@@ -3,7 +3,7 @@ package tron
 import "testing"
 
 // Tron delegates to the shared EVM policy.
-func TestCacheable(t *testing.T) {
+func TestCacheableRequest(t *testing.T) {
 	c := &Chain{}
 	for method, want := range map[string]bool{
 		"eth_getBlockByHash":       true,
@@ -11,8 +11,8 @@ func TestCacheable(t *testing.T) {
 		"eth_blockNumber":          false,
 		"eth_sendRawTransaction":   false,
 	} {
-		if got := c.Cacheable(method, nil); got != want {
-			t.Errorf("Cacheable(%q) = %v, want %v", method, got, want)
+		if got := c.CacheableRequest(method, nil); got != want {
+			t.Errorf("CacheableRequest(%q) = %v, want %v", method, got, want)
 		}
 	}
 }

@@ -30,13 +30,13 @@ var cacheable = map[string]struct{}{
 	"getblockhash":   {},
 }
 
-func (c *Chain) Cacheable(method string, _ json.RawMessage) bool {
+func (c *Chain) CacheableRequest(method string, _ json.RawMessage) bool {
 	_, ok := cacheable[method]
 	return ok
 }
 
-// CacheableResult caches any non-null, non-empty successful result.
-func (c *Chain) CacheableResult(_ string, result json.RawMessage) bool {
+// CacheableResponse caches any non-null, non-empty successful result.
+func (c *Chain) CacheableResponse(_ string, result json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(result)
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }

@@ -79,7 +79,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 	missIdx := make([]int, 0, len(req.Requests))
 
 	for i, sub := range req.Requests {
-		if endpoint.CacheEnabled() && c.Cacheable(sub.Method, sub.Params) {
+		if endpoint.CacheEnabled() && c.CacheableRequest(sub.Method, sub.Params) {
 			key := cache.Key(sub.Method, sub.Params)
 			cacheKeys[i] = key
 			if val, ok, _ := endpoint.Cache().Get(ctx, key); ok {
@@ -119,7 +119,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 	for j, idx := range missIdx {
 		sub := res.Responses[j]
 		responses[idx] = sub
-		if cacheKeys[idx] != "" && !sub.IsError() && c.CacheableResult(req.Requests[idx].Method, sub.Result) {
+		if cacheKeys[idx] != "" && !sub.IsError() && c.CacheableResponse(req.Requests[idx].Method, sub.Result) {
 			_ = endpoint.Cache().Set(ctx, cacheKeys[idx], sub.Result, endpoint.GetCacheTTL())
 		}
 	}

@@ -38,19 +38,19 @@ type Chain interface {
 	// ParseErrorResponse parses the error response from the provider and returns an error if the error should set the provider as unhealthy.
 	HandleError(code int, message string) error
 
-	// Cacheable reports whether a request (method + raw params) is eligible for
+	// CacheableRequest reports whether a request (method + raw params) is eligible for
 	// caching: a per-chain allowlist of read-only methods whose result is stable
 	// over a TTL, excluding params that reference mutable state (e.g. an EVM
 	// "latest"/"pending" block tag). Params are passed so each chain decides
 	// volatility in its own terms. This differs from coalesceability: a method
 	// may be safe to share between concurrent callers yet change too often to cache.
-	Cacheable(method string, params json.RawMessage) bool
+	CacheableRequest(method string, params json.RawMessage) bool
 
-	// CacheableResult reports whether a specific successful result for method may
+	// CacheableResponse reports whether a specific successful result for method may
 	// be stored. It guards results that are not yet immutable, e.g. an
 	// unconfirmed eth_getTransactionByHash (null blockNumber) or a null/missing
 	// lookup. result is the raw JSON of the response's "result" field.
-	CacheableResult(method string, result json.RawMessage) bool
+	CacheableResponse(method string, result json.RawMessage) bool
 }
 
 var (

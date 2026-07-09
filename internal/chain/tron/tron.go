@@ -34,14 +34,14 @@ func (c *Chain) HandleError(code int, message string) error {
 	return nil
 }
 
-// Cacheable and CacheableResult delegate to the shared EVM policy: Tron speaks
+// CacheableRequest and CacheableResponse delegate to the shared EVM policy: Tron speaks
 // the EVM JSON-RPC surface.
-func (c *Chain) Cacheable(method string, params json.RawMessage) bool {
-	return eth.Cacheable(method, params)
+func (c *Chain) CacheableRequest(method string, params json.RawMessage) bool {
+	return eth.CacheableRequest(method, params)
 }
 
-func (c *Chain) CacheableResult(method string, result json.RawMessage) bool {
-	return eth.CacheableResult(method, result)
+func (c *Chain) CacheableResponse(method string, result json.RawMessage) bool {
+	return eth.CacheableResponse(method, result)
 }
 
 // Healthcheck batches the node-info RPCs (client version, chain id, block
