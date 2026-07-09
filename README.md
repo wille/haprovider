@@ -44,7 +44,7 @@ Providers are tried in priority order; an unhealthy one is taken out of rotation
 - **Traffic Observability**: Monitor and analyze your RPC traffic patterns
 - **Request Validation**: Validates requests and responses to detect errors
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
-- **Request Coalescing**: Collapses identical concurrent read requests into a single upstream call and fans the response back to every caller
+- **Request Coalescing**: Collapses identical concurrent read requests into a single upstream call and fans the response back to every client
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
 
