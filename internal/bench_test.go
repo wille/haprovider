@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/cache"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/rpctest"
 )
@@ -76,5 +77,37 @@ func BenchmarkIncomingHttpRpcHandler(b *testing.B) {
 				IncomingHttpRpcHandler(context.Background(), ep, w, r, &servertiming.Header{})
 			}
 		})
+	}
+}
+
+// BenchmarkIncomingHttpRpcHandler_CacheHit measures serving a cacheable request
+// entirely from the warm cache, i.e. the path that skips the upstream round-trip.
+// Compare against the "small" case above to see the cache win.
+func BenchmarkIncomingHttpRpcHandler_CacheHit(b *testing.B) {
+	srv := rpctest.NewServer(map[string]any{"eth_getBlockByHash": map[string]string{"hash": "0xabc"}}, nil)
+	b.Cleanup(srv.Close)
+
+	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth}
+	if err := ep.InitCache(cache.NewMemory(0, 0)); err != nil {
+		b.Fatal(err)
+	}
+	p := &core.Provider{Name: "p", Http: srv.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{p}
+	p.MarkHealthy(0)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByHash","params":["0xh",false]}`
+
+	// Warm the cache so every measured iteration is a hit.
+	warm := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(body))
+	warm.Header.Set("Content-Type", "application/json")
+	IncomingHttpRpcHandler(context.Background(), ep, httptest.NewRecorder(), warm, &servertiming.Header{})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		IncomingHttpRpcHandler(context.Background(), ep, w, r, &servertiming.Header{})
 	}
 }

@@ -2,6 +2,7 @@ package tron
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -31,6 +32,16 @@ func (c *Chain) HandleError(code int, message string) error {
 	}
 
 	return nil
+}
+
+// CacheableRequest and CacheableResponse delegate to the shared EVM policy: Tron speaks
+// the EVM JSON-RPC surface.
+func (c *Chain) CacheableRequest(method string, params json.RawMessage) bool {
+	return eth.CacheableRequest(method, params)
+}
+
+func (c *Chain) CacheableResponse(method string, result json.RawMessage) bool {
+	return eth.CacheableResponse(method, result)
 }
 
 // Coalesceable delegates to the shared EVM policy: Tron speaks the EVM

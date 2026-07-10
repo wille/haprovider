@@ -11,6 +11,7 @@ import (
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
+	"github.com/wille/haprovider/internal/cache"
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
@@ -68,41 +69,130 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		ctx = httpx.WithForwardedFor(ctx, r)
 	}
 
-	// Coalesce a single (non-batch) read-only call: identical concurrent requests
-	// share one upstream call. Batches and stateful/non-idempotent methods run
-	// their own request (see chain.Coalesceable).
 	c := chain.New(endpoint.Kind)
-	if !req.IsBatch && len(req.Requests) == 1 && c != nil && c.Coalesceable(req.Requests[0].Method) {
-		coalesceRequest(ctx, endpoint, req, timing, log, w)
+
+	// Cache plan: for each sub-request, serve cacheable hits from the cache and
+	// collect the rest (misses + non-cacheable) to forward upstream. This works
+	// for a single request and for every element of a batch independently.
+	cacheKeys := make([]string, len(req.Requests)) // "" = not cacheable, so not stored
+	responses := make([]*rpc.Response, len(req.Requests))
+	missIdx := make([]int, 0, len(req.Requests))
+
+	for i, sub := range req.Requests {
+		if endpoint.CacheEnabled() && c.CacheableRequest(sub.Method, sub.Params) {
+			key := cache.Key(sub.Method, sub.Params)
+			cacheKeys[i] = key
+			if val, ok, _ := endpoint.Cache().Get(ctx, key); ok {
+				metrics.RecordCacheHit(endpoint.Name, sub.Method)
+				responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Result: val}
+				continue
+			}
+			metrics.RecordCacheMiss(endpoint.Name, sub.Method)
+		}
+		missIdx = append(missIdx, i)
+	}
+
+	// Everything was a cache hit: answer without contacting a provider.
+	if len(missIdx) == 0 {
+		log.Debug("cache hit", "batch", req.IsBatch, "size", len(req.Requests))
+		if !endpoint.Public {
+			w.Header().Set("X-Cache", "HIT")
+		}
+		writeBatch(w, &rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch}, log)
 		return
 	}
 
-	result, err := forwardWithFailover(ctx, endpoint, req, timing, log)
+	// Forward only the misses upstream, preserving the original request shape.
+	miss := &rpc.BatchRequest{IsBatch: req.IsBatch, Requests: make([]*rpc.Request, len(missIdx))}
+	for j, idx := range missIdx {
+		miss.Requests[j] = req.Requests[idx]
+	}
+
+	res, provider, err := forwardMisses(ctx, endpoint, c, req, miss, timing, log)
 	if err != nil {
 		writeForwardError(w, err, log)
 		return
 	}
-	writeBatchResponse(w, endpoint, result.provider, result.res, log)
+
+	// Merge the upstream responses back into their original positions and store
+	// fresh cacheable results. Value-copy and stamp the client's own id: a
+	// coalesced response is shared with other callers and carries the leader's id.
+	for j, idx := range missIdx {
+		sub := *res.Responses[j]
+		sub.ID = req.Requests[idx].ID
+		responses[idx] = &sub
+		if cacheKeys[idx] != "" && !sub.IsError() && c.CacheableResponse(req.Requests[idx].Method, sub.Result) {
+			_ = endpoint.Cache().Set(ctx, cacheKeys[idx], sub.Result, endpoint.GetCacheTTL())
+		}
+	}
+
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
+	}
+	writeBatch(w, &rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch}, log)
 }
 
-// forwardResult is the outcome of a successful failover: the upstream response
-// and the provider that served it. It is shared verbatim between coalesced
-// callers, so callers must not mutate its response before writing.
+// forwardResult is the outcome of a successful failover, used as the singleflight
+// payload for coalesced requests.
 type forwardResult struct {
 	res      *rpc.BatchResponse
 	provider *core.Provider
 }
 
-// errNoProvidersAvailable is returned by forwardWithFailover when every provider
-// is offline or has failed the request.
+// forwardMisses forwards the miss sub-batch. A single coalesceable request is
+// deduplicated through the endpoint's singleflight group so identical concurrent
+// misses share one upstream call; anything else (batches, non-coalesceable
+// methods) is forwarded directly.
+func forwardMisses(ctx context.Context, endpoint *core.Endpoint, c chain.Chain, req, miss *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*rpc.BatchResponse, *core.Provider, error) {
+	if !req.IsBatch && c.Coalesceable(miss.Requests[0].Method) {
+		return coalesceForward(ctx, endpoint, c, miss, timing, log)
+	}
+	return forwardBatch(ctx, endpoint, c, miss, timing, log)
+}
+
+// coalesceForward wraps forwardBatch in the endpoint's singleflight group, keyed
+// by method+params, so identical concurrent misses collapse into one upstream call.
+func coalesceForward(ctx context.Context, endpoint *core.Endpoint, c chain.Chain, miss *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*rpc.BatchResponse, *core.Provider, error) {
+	req0 := miss.Requests[0]
+	key := cache.Key(req0.Method, req0.Params)
+
+	ch := endpoint.Coalescer.DoChan(key, func() (any, error) {
+		// Detached context: one client disconnecting must not cancel the shared
+		// upstream call the other coalesced callers are waiting on. It stays bounded
+		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
+		res, provider, err := forwardBatch(context.WithoutCancel(ctx), endpoint, c, miss, timing, log)
+		if err != nil {
+			return nil, err
+		}
+		return &forwardResult{res: res, provider: provider}, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		// This client left; the shared work continues for the others.
+		return nil, nil, ctx.Err()
+	case sf := <-ch:
+		if sf.Shared {
+			metrics.RecordCoalescedRequest(endpoint.Name, req0.Method)
+			log.Debug("request coalesced", "method", req0.Method, "params", rpc.FormatRawBody(string(req0.Params)))
+		}
+		if sf.Err != nil {
+			return nil, nil, sf.Err
+		}
+		fr := sf.Val.(*forwardResult)
+		return fr.res, fr.provider, nil
+	}
+}
+
+// errNoProvidersAvailable is returned by forwardBatch when no online provider
+// could serve the request.
 var errNoProvidersAvailable = errors.New("no providers available")
 
-// forwardWithFailover runs the provider failover loop for req and returns the
-// first successful response and the provider that produced it. It records
-// per-request metrics and marks providers unhealthy on failure. It returns
-// ctx.Err() if the context is cancelled mid-flight, or errNoProvidersAvailable
-// when no provider could serve the request.
-func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
+// forwardBatch runs the provider failover loop for req and returns the first
+// successful response and the provider that produced it. It records per-request
+// metrics and marks providers unhealthy on failure. It returns ctx.Err() if the
+// context is cancelled mid-flight, or errNoProvidersAvailable when exhausted.
+func forwardBatch(ctx context.Context, endpoint *core.Endpoint, c chain.Chain, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*rpc.BatchResponse, *core.Provider, error) {
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
@@ -119,7 +209,7 @@ NextProvider:
 		// context — which never cancels).
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		default:
 		}
 
@@ -135,11 +225,12 @@ NextProvider:
 			continue NextProvider
 		}
 
-		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).String())
-		if req.IsBatch {
-			reqLog.Debug("batch request", "size", len(req.Requests))
-		} else {
-			reqLog.Debug("request", "method", req.Requests[0].Method)
+		// A response must map one-to-one to the request; otherwise the merge back
+		// to the client is unsafe.
+		if len(res.Responses) != len(req.Requests) {
+			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
+			continue NextProvider
 		}
 
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
@@ -156,63 +247,20 @@ NextProvider:
 		for _, sub := range res.Responses {
 			if sub.IsError() {
 				errorCode, errorMessage := sub.GetError()
-				reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+				log.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
 
-				if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
+				if herr := c.HandleError(errorCode, errorMessage.Error()); herr != nil {
 					provider.MarkUnhealthy(herr)
 					continue NextProvider
 				}
 			}
 		}
 
-		if req.IsBatch && len(res.Responses) != len(req.Requests) {
-			reqLog.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
-			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
-			continue NextProvider
-		}
-
-		return &forwardResult{res: res, provider: provider}, nil
+		log.With("provider", provider.Name, "request_time", time.Since(start).String()).Debug("forwarded")
+		return res, provider, nil
 	}
 
-	return nil, errNoProvidersAvailable
-}
-
-// coalesceRequest routes a single coalesceable request through the endpoint's
-// singleflight group so identical concurrent requests share one upstream call,
-// then writes the shared response to this client with its own JSON-RPC id.
-func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger, w http.ResponseWriter) {
-	// id is excluded from the key: it varies per client. Params is raw JSON, so
-	// only byte-identical params collapse (a safe, if occasionally conservative, key).
-	key := req.Requests[0].Method + "\x00" + string(req.Requests[0].Params)
-
-	ch := endpoint.Coalescer.DoChan(key, func() (any, error) {
-		// Detached context: one client disconnecting must not cancel the shared
-		// upstream call the other coalesced callers are waiting on. It stays bounded
-		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
-		return forwardWithFailover(context.WithoutCancel(ctx), endpoint, req, timing, log)
-	})
-
-	select {
-	case <-ctx.Done():
-		// This client left; the shared work continues for the others.
-		return
-	case sf := <-ch:
-		if sf.Shared {
-			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
-			log.Debug("request coalesced", "method", req.Requests[0].Method, "params", rpc.FormatRawBody(string(req.Requests[0].Params)))
-		}
-		if sf.Err != nil {
-			writeForwardError(w, sf.Err, log)
-			return
-		}
-
-		shared := sf.Val.(*forwardResult)
-		// Value-copy the shared response and stamp this client's id onto the copy;
-		// concurrent callers must never mutate the shared *rpc.Response.
-		resp := *shared.res.Responses[0]
-		resp.ID = req.Requests[0].ID
-		writeBatchResponse(w, endpoint, shared.provider, rpc.NewBatchResponse(&resp), log)
-	}
+	return nil, nil, errNoProvidersAvailable
 }
 
 // writeForwardError writes the appropriate client response for a failover error.
@@ -236,13 +284,8 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 	http.Error(w, "request failed", http.StatusInternalServerError)
 }
 
-// writeBatchResponse serializes res and writes it to the client, setting the
-// X-Provider header (unless the endpoint is public) and content type.
-func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider *core.Provider, res *rpc.BatchResponse, log *slog.Logger) {
-	if !endpoint.Public {
-		w.Header().Set("X-Provider", provider.Name)
-	}
-
+// writeBatch serializes and writes a batch response, setting the JSON content type.
+func writeBatch(w http.ResponseWriter, res *rpc.BatchResponse, log *slog.Logger) {
 	out, err := rpc.SerializeBatchResponse(res)
 	if err != nil {
 		log.Error("error serializing response", "error", err)

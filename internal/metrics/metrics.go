@@ -70,6 +70,15 @@ var (
 		[]string{"endpoint", "transport"},
 	)
 
+	// Cache lookups, labeled by result (hit/miss).
+	cacheRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "haprovider_cache_requests_total",
+			Help: "Total number of cache lookups by result (hit/miss)",
+		},
+		[]string{"endpoint", "method", "result"},
+	)
+
 	// Requests served from a coalesced (deduplicated) upstream call rather than
 	// their own upstream request.
 	coalescedRequests = prometheus.NewCounterVec(
@@ -90,8 +99,20 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(providerHealth)
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
+	prometheus.MustRegister(cacheRequests)
 	prometheus.MustRegister(coalescedRequests)
+
 	return promhttp.Handler()
+}
+
+// RecordCacheHit records a cache hit for a request.
+func RecordCacheHit(endpoint, method string) {
+	cacheRequests.WithLabelValues(endpoint, method, "hit").Inc()
+}
+
+// RecordCacheMiss records a cache miss for a request.
+func RecordCacheMiss(endpoint, method string) {
+	cacheRequests.WithLabelValues(endpoint, method, "miss").Inc()
 }
 
 // RecordCoalescedRequest records that a request was served from a shared

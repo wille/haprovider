@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wille/haprovider/internal/chain/btc"
 	"github.com/wille/haprovider/internal/chain/eth"
@@ -36,6 +37,20 @@ type Chain interface {
 
 	// ParseErrorResponse parses the error response from the provider and returns an error if the error should set the provider as unhealthy.
 	HandleError(code int, message string) error
+
+	// CacheableRequest reports whether a request (method + raw params) is eligible for
+	// caching: a per-chain allowlist of read-only methods whose result is stable
+	// over a TTL, excluding params that reference mutable state (e.g. an EVM
+	// "latest"/"pending" block tag). Params are passed so each chain decides
+	// volatility in its own terms. This differs from coalesceability: a method
+	// may be safe to share between concurrent callers yet change too often to cache.
+	CacheableRequest(method string, params json.RawMessage) bool
+
+	// CacheableResponse reports whether a specific successful result for method may
+	// be stored. It guards results that are not yet immutable, e.g. an
+	// unconfirmed eth_getTransactionByHash (null blockNumber) or a null/missing
+	// lookup. result is the raw JSON of the response's "result" field.
+	CacheableResponse(method string, result json.RawMessage) bool
 
 	// Coalesceable reports whether identical concurrent calls to this method may
 	// be collapsed into a single upstream request (in-flight deduplication).

@@ -1,7 +1,9 @@
 package btc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 
@@ -18,6 +20,26 @@ var genesisBlocks = map[string]string{
 }
 
 type Chain struct{}
+
+// cacheable is the allowlist of Bitcoin RPC methods whose responses may be
+// cached. Restricted to by-hash lookups whose result is immutable; verbose
+// getrawtransaction is excluded because its "confirmations" field changes.
+var cacheable = map[string]struct{}{
+	"getblock":       {},
+	"getblockheader": {},
+	"getblockhash":   {},
+}
+
+func (c *Chain) CacheableRequest(method string, _ json.RawMessage) bool {
+	_, ok := cacheable[method]
+	return ok
+}
+
+// CacheableResponse caches any non-null, non-empty successful result.
+func (c *Chain) CacheableResponse(_ string, result json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(result)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
 
 // coalesceable is the allowlist of Bitcoin RPC methods that are safe to collapse
 // into a single upstream call. Anything not listed is not coalesced.
