@@ -56,6 +56,31 @@ func (c *Chain) CacheableResponse(_ string, result json.RawMessage) bool {
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
+// coalesceable is the allowlist of Solana JSON-RPC methods that are safe to
+// collapse into a single upstream call. Anything not listed is not coalesced.
+var coalesceable = map[string]struct{}{
+	"getAccountInfo":         {},
+	"getMultipleAccounts":    {},
+	"getBalance":             {},
+	"getBlock":               {},
+	"getBlockHeight":         {},
+	"getSlot":                {},
+	"getTransaction":         {},
+	"getSignatureStatuses":   {},
+	"getLatestBlockhash":     {},
+	"getEpochInfo":           {},
+	"getVersion":             {},
+	"getGenesisHash":         {},
+	"getHealth":              {},
+	"getTokenAccountBalance": {},
+}
+
+// Coalesceable reports whether identical concurrent Solana calls may be deduplicated.
+func (c *Chain) Coalesceable(method string) bool {
+	_, ok := coalesceable[method]
+	return ok
+}
+
 func (c *Chain) HandleError(code int, message string) error {
 	switch code {
 	// Node is unhealthy / behind by slots

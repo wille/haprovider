@@ -47,6 +47,43 @@ func (c *Ethereum) CacheableResponse(method string, result json.RawMessage) bool
 	return CacheableResponse(method, result)
 }
 
+func (c *Ethereum) Coalesceable(method string) bool {
+	return Coalesceable(method)
+}
+
+// coalesceable is the allowlist of EVM JSON-RPC methods that are safe to collapse
+// into a single upstream call (read-only and idempotent). Anything not listed is
+// not coalesced. Shared by the Ethereum and Tron chains (Tron speaks EVM JSON-RPC).
+var coalesceable = map[string]struct{}{
+	"eth_call":                  {},
+	"eth_getBalance":            {},
+	"eth_getCode":               {},
+	"eth_getStorageAt":          {},
+	"eth_getTransactionByHash":  {},
+	"eth_getTransactionReceipt": {},
+	"eth_getBlockByNumber":      {},
+	"eth_getBlockByHash":        {},
+	"eth_getBlockReceipts":      {},
+	"eth_getLogs":               {},
+	"eth_getTransactionCount":   {},
+	"eth_estimateGas":           {},
+	"eth_gasPrice":              {},
+	"eth_feeHistory":            {},
+	"eth_maxPriorityFeePerGas":  {},
+	"eth_blockNumber":           {},
+	"eth_chainId":               {},
+	"net_version":               {},
+	"web3_clientVersion":        {},
+}
+
+// Coalesceable reports whether identical concurrent calls to an EVM JSON-RPC
+// method may be deduplicated into a single upstream request. Exported so the
+// Tron chain (which speaks the EVM JSON-RPC surface) can reuse the same policy.
+func Coalesceable(method string) bool {
+	_, ok := coalesceable[method]
+	return ok
+}
+
 func (c Ethereum) ValidateConfig(e *core.Endpoint) error {
 	if e.ChainID != "" {
 		_, err := strconv.ParseUint(e.ChainID, 10, 64)

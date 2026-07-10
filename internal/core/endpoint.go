@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/wille/haprovider/internal/cache"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultCacheTTL is the response-cache TTL applied when an endpoint does not
@@ -75,6 +77,10 @@ type Endpoint struct {
 	// mu guards ChainID, which is set/validated concurrently by per-provider
 	// healthcheck goroutines sharing this endpoint.
 	mu sync.Mutex
+
+	// Coalescer deduplicates identical concurrent upstream requests on the HTTP
+	// path. The zero value is ready to use; keys are scoped to this endpoint.
+	Coalescer singleflight.Group
 }
 
 // InitCache parses the configured cache_ttl and attaches the given storage

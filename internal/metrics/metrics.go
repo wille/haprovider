@@ -78,6 +78,16 @@ var (
 		},
 		[]string{"endpoint", "method", "result"},
 	)
+
+	// Requests served from a coalesced (deduplicated) upstream call rather than
+	// their own upstream request.
+	coalescedRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "haprovider_coalesced_requests_total",
+			Help: "Total number of requests served from a coalesced upstream call",
+		},
+		[]string{"endpoint", "method"},
+	)
 )
 
 // MetricsHandler returns an HTTP handler for the Prometheus metrics endpoint
@@ -90,6 +100,8 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
 	prometheus.MustRegister(cacheRequests)
+	prometheus.MustRegister(coalescedRequests)
+
 	return promhttp.Handler()
 }
 
@@ -101,6 +113,12 @@ func RecordCacheHit(endpoint, method string) {
 // RecordCacheMiss records a cache miss for a request.
 func RecordCacheMiss(endpoint, method string) {
 	cacheRequests.WithLabelValues(endpoint, method, "miss").Inc()
+}
+
+// RecordCoalescedRequest records that a request was served from a shared
+// (deduplicated) upstream call instead of issuing its own.
+func RecordCoalescedRequest(endpoint, method string) {
+	coalescedRequests.WithLabelValues(endpoint, method).Inc()
 }
 
 // TrackInflight increments the in-flight gauge and returns a function that

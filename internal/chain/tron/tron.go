@@ -44,6 +44,12 @@ func (c *Chain) CacheableResponse(method string, result json.RawMessage) bool {
 	return eth.CacheableResponse(method, result)
 }
 
+// Coalesceable delegates to the shared EVM policy: Tron speaks the EVM
+// JSON-RPC surface, so the same stateful/non-idempotent methods are excluded.
+func (c *Chain) Coalesceable(method string) bool {
+	return eth.Coalesceable(method)
+}
+
 // Healthcheck batches the node-info RPCs (client version, chain id, block
 // height). Tron has no custom healthcheck beyond the node info. The returned
 // NodeInfo is populated with everything parsed so far, even when an error is

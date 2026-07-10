@@ -51,6 +51,11 @@ type Chain interface {
 	// unconfirmed eth_getTransactionByHash (null blockNumber) or a null/missing
 	// lookup. result is the raw JSON of the response's "result" field.
 	CacheableResponse(method string, result json.RawMessage) bool
+
+	// Coalesceable reports whether identical concurrent calls to this method may
+	// be collapsed into a single upstream request (in-flight deduplication).
+	// Default-deny: only methods on the chain's read-only allowlist return true.
+	Coalesceable(method string) bool
 }
 
 var (

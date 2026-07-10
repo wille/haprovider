@@ -45,6 +45,7 @@ Providers are tried in priority order; an unhealthy one is taken out of rotation
 - **Request Validation**: Validates requests and responses to detect errors
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
 - **Response Caching**: Serves repeat reads of immutable data from an in-memory cache instead of the upstream
+- **Request Coalescing**: Collapses identical concurrent read requests into a single upstream call and fans the response back to every client
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
 
@@ -78,6 +79,20 @@ one large payload cannot dominate the cache.
 ### *What haprovider doesn't do right now*
 
 - Transaction broadcasts to multiple nodes
+
+### Request coalescing
+
+When several clients send the **same** read request at the same time, haprovider
+issues a single upstream call and returns that one response to all of them. This
+cuts redundant load on your providers and reduces rate-limit (429) exposure under
+bursty traffic, for example many clients polling `eth_getTransactionReceipt` for
+the same hash.
+
+Coalescing is automatic on the HTTP JSON-RPC path and only applies to an
+allowlist of read-only, idempotent methods per chain; transaction submission,
+filters, subscriptions and other stateful calls are always sent individually.
+Batch requests are never coalesced. The `haprovider_coalesced_requests_total`
+metric tracks how many requests were served from a shared upstream call.
 
 ## Installation
 
