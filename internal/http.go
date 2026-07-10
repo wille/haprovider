@@ -199,7 +199,7 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 	case sf := <-ch:
 		if sf.Shared {
 			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
-			log.Debug("request coalesced", "method", req.Requests[0].Method)
+			log.Debug("request coalesced", "method", req.Requests[0].Method, "params", rpc.FormatRawBody(string(req.Requests[0].Params)))
 		}
 		if sf.Err != nil {
 			writeForwardError(w, sf.Err, log)
