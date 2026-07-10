@@ -36,6 +36,11 @@ type Chain interface {
 
 	// ParseErrorResponse parses the error response from the provider and returns an error if the error should set the provider as unhealthy.
 	HandleError(code int, message string) error
+
+	// Coalesceable reports whether identical concurrent calls to this method may
+	// be collapsed into a single upstream request (in-flight deduplication).
+	// Default-deny: only methods on the chain's read-only allowlist return true.
+	Coalesceable(method string) bool
 }
 
 var (

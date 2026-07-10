@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultMaxResponseSize bounds how large an upstream provider response may be
@@ -53,6 +55,10 @@ type Endpoint struct {
 	// mu guards ChainID, which is set/validated concurrently by per-provider
 	// healthcheck goroutines sharing this endpoint.
 	mu sync.Mutex
+
+	// Coalescer deduplicates identical concurrent upstream requests on the HTTP
+	// path. The zero value is ready to use; keys are scoped to this endpoint.
+	Coalescer singleflight.Group
 }
 
 // SetChainID records the chain ID reported by a provider. The first provider to

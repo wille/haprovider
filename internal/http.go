@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -67,6 +68,41 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		ctx = httpx.WithForwardedFor(ctx, r)
 	}
 
+	// Coalesce a single (non-batch) read-only call: identical concurrent requests
+	// share one upstream call. Batches and stateful/non-idempotent methods run
+	// their own request (see chain.Coalesceable).
+	c := chain.New(endpoint.Kind)
+	if !req.IsBatch && len(req.Requests) == 1 && c != nil && c.Coalesceable(req.Requests[0].Method) {
+		coalesceRequest(ctx, endpoint, req, timing, log, w)
+		return
+	}
+
+	result, err := forwardWithFailover(ctx, endpoint, req, timing, log)
+	if err != nil {
+		writeForwardError(w, err, log)
+		return
+	}
+	writeBatchResponse(w, endpoint, result.provider, result.res, log)
+}
+
+// forwardResult is the outcome of a successful failover: the upstream response
+// and the provider that served it. It is shared verbatim between coalesced
+// callers, so callers must not mutate its response before writing.
+type forwardResult struct {
+	res      *rpc.BatchResponse
+	provider *core.Provider
+}
+
+// errNoProvidersAvailable is returned by forwardWithFailover when every provider
+// is offline or has failed the request.
+var errNoProvidersAvailable = errors.New("no providers available")
+
+// forwardWithFailover runs the provider failover loop for req and returns the
+// first successful response and the provider that produced it. It records
+// per-request metrics and marks providers unhealthy on failure. It returns
+// ctx.Err() if the context is cancelled mid-flight, or errNoProvidersAvailable
+// when no provider could serve the request.
+func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
@@ -79,10 +115,11 @@ NextProvider:
 		res, err := httpx.SendRPCBatchRequest(ctx, provider, req)
 		m.Stop()
 
-		// Client connection closed
+		// Client connection closed (or, for a coalesced call, the detached
+		// context — which never cancels).
 		select {
 		case <-ctx.Done():
-			return
+			return nil, ctx.Err()
 		default:
 		}
 
@@ -98,12 +135,11 @@ NextProvider:
 			continue NextProvider
 		}
 
-		log = log.With("provider", provider.Name, "request_time", time.Since(start).String())
-
+		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).String())
 		if req.IsBatch {
-			log.Debug("batch request", "size", len(req.Requests))
+			reqLog.Debug("batch request", "size", len(req.Requests))
 		} else {
-			log.Debug("request", "method", req.Requests[0].Method)
+			reqLog.Debug("request", "method", req.Requests[0].Method)
 		}
 
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
@@ -117,51 +153,105 @@ NextProvider:
 			}
 		}
 
-		for _, res := range res.Responses {
-			if res.IsError() {
-				errorCode, errorMessage := res.GetError()
-				log.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+		for _, sub := range res.Responses {
+			if sub.IsError() {
+				errorCode, errorMessage := sub.GetError()
+				reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
 
-				err := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error())
-
-				if err != nil {
-					provider.MarkUnhealthy(err)
+				if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
+					provider.MarkUnhealthy(herr)
 					continue NextProvider
 				}
 			}
 		}
 
 		if req.IsBatch && len(res.Responses) != len(req.Requests) {
-			log.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			reqLog.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
 			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
 			continue NextProvider
 		}
 
-		if !endpoint.Public {
-			w.Header().Set("X-Provider", provider.Name)
-		}
+		return &forwardResult{res: res, provider: provider}, nil
+	}
 
-		out, err := rpc.SerializeBatchResponse(res)
-		if err != nil {
-			log.Error("error serializing response", "error", err)
-			http.Error(w, "error serializing response", http.StatusInternalServerError)
+	return nil, errNoProvidersAvailable
+}
+
+// coalesceRequest routes a single coalesceable request through the endpoint's
+// singleflight group so identical concurrent requests share one upstream call,
+// then writes the shared response to this client with its own JSON-RPC id.
+func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger, w http.ResponseWriter) {
+	// id is excluded from the key: it varies per client. Params is raw JSON, so
+	// only byte-identical params collapse (a safe, if occasionally conservative, key).
+	key := req.Requests[0].Method + "\x00" + string(req.Requests[0].Params)
+
+	ch := endpoint.Coalescer.DoChan(key, func() (any, error) {
+		// Detached context: one client disconnecting must not cancel the shared
+		// upstream call the other coalesced callers are waiting on. It stays bounded
+		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
+		return forwardWithFailover(context.WithoutCancel(ctx), endpoint, req, timing, log)
+	})
+
+	select {
+	case <-ctx.Done():
+		// This client left; the shared work continues for the others.
+		return
+	case sf := <-ch:
+		if sf.Shared {
+			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
+		}
+		if sf.Err != nil {
+			writeForwardError(w, sf.Err, log)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		shared := sf.Val.(*forwardResult)
+		// Value-copy the shared response and stamp this client's id onto the copy;
+		// concurrent callers must never mutate the shared *rpc.Response.
+		resp := *shared.res.Responses[0]
+		resp.ID = req.Requests[0].ID
+		writeBatchResponse(w, endpoint, shared.provider, rpc.NewBatchResponse(&resp), log)
+	}
+}
 
-		if _, err := w.Write(out); err != nil {
-			log.Error("error writing body", "error", err)
-		}
-
+// writeForwardError writes the appropriate client response for a failover error.
+func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
+	// Client disconnected mid-flight: nothing left to write to.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 
-	log.Error("no providers available")
+	if errors.Is(err, errNoProvidersAvailable) {
+		log.Error("no providers available")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
+			log.Error("error writing body", "error", werr)
+		}
+		return
+	}
+
+	log.Error("request failed", "error", err)
+	http.Error(w, "request failed", http.StatusInternalServerError)
+}
+
+// writeBatchResponse serializes res and writes it to the client, setting the
+// X-Provider header (unless the endpoint is public) and content type.
+func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider *core.Provider, res *rpc.BatchResponse, log *slog.Logger) {
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
+	}
+
+	out, err := rpc.SerializeBatchResponse(res)
+	if err != nil {
+		log.Error("error serializing response", "error", err)
+		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	if err := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); err != nil {
+
+	if _, err := w.Write(out); err != nil {
 		log.Error("error writing body", "error", err)
 	}
 }
