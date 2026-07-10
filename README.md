@@ -175,7 +175,7 @@ endpoints:
 - `log_level`: Logging level (debug, info, warn, error)
 - `log_json`: Enable JSON logs
 - `endpoints`: Map of endpoint configurations
-  - `kind`: Chain type (eth, solana, tron, btc) (default: eth)
+  - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API.
   - `chainId`: Network chain ID (optional, EVM chains)
   - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)

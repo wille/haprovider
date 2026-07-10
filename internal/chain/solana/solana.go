@@ -56,6 +56,11 @@ func (c *Chain) Coalesceable(method string) bool {
 	return ok
 }
 
+// AllowMethod allows all methods; Solana endpoints are not filtered.
+func (c *Chain) AllowMethod(method string) bool {
+	return true
+}
+
 func (c *Chain) HandleError(code int, message string) error {
 	switch code {
 	// Node is unhealthy / behind by slots

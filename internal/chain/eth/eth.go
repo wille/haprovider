@@ -42,6 +42,11 @@ func (c *Ethereum) Coalesceable(method string) bool {
 	return Coalesceable(method)
 }
 
+// AllowMethod allows all methods; Ethereum/EVM endpoints are not filtered.
+func (c *Ethereum) AllowMethod(method string) bool {
+	return true
+}
+
 // coalesceable is the allowlist of EVM JSON-RPC methods that are safe to collapse
 // into a single upstream call (read-only and idempotent). Anything not listed is
 // not coalesced. Shared by the Ethereum and Tron chains (Tron speaks EVM JSON-RPC).

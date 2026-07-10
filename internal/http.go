@@ -18,6 +18,10 @@ import (
 	"github.com/wille/haprovider/internal/rpc"
 )
 
+// errCodeResourceUnavailable is the JSON-RPC error code ("Resource Unavailable")
+// returned when a chain does not allow a client to call a method.
+const errCodeResourceUnavailable = -32002
+
 func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	defer metrics.TrackInflight(endpoint.Name, "http")()
 
@@ -72,6 +76,20 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 	// share one upstream call. Batches and stateful/non-idempotent methods run
 	// their own request (see chain.Coalesceable).
 	c := chain.New(endpoint.Kind)
+
+	// Reject requests to methods the chain doesn't allow clients to call (e.g.
+	// Bitcoin wallet/mining/control commands). A request containing any disallowed
+	// method is rejected in full.
+	if c != nil {
+		for _, sub := range req.Requests {
+			if !c.AllowMethod(sub.Method) {
+				log.Warn("method not allowed", "method", sub.Method)
+				writeMethodNotAllowed(w, c, req, log)
+				return
+			}
+		}
+	}
+
 	if !req.IsBatch && len(req.Requests) == 1 && c != nil && c.Coalesceable(req.Requests[0].Method) {
 		coalesceRequest(ctx, endpoint, req, timing, log, w)
 		return
@@ -244,6 +262,34 @@ func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider
 	}
 
 	out, err := rpc.SerializeBatchResponse(res)
+	if err != nil {
+		log.Error("error serializing response", "error", err)
+		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if _, err := w.Write(out); err != nil {
+		log.Error("error writing body", "error", err)
+	}
+}
+
+// writeMethodNotAllowed rejects a request that contains a method the chain does
+// not allow, without contacting any provider. Each sub-request gets a JSON-RPC
+// error: the offending method(s) report "method not allowed", and any other
+// members of the same batch report that the batch was rejected.
+func writeMethodNotAllowed(w http.ResponseWriter, c chain.Chain, req *rpc.BatchRequest, log *slog.Logger) {
+	responses := make([]*rpc.Response, len(req.Requests))
+	for i, sub := range req.Requests {
+		msg := "method not allowed: " + sub.Method
+		if c.AllowMethod(sub.Method) {
+			msg = "request rejected: batch contains a method that is not allowed"
+		}
+		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(errCodeResourceUnavailable, msg)}
+	}
+
+	out, err := rpc.SerializeBatchResponse(&rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch})
 	if err != nil {
 		log.Error("error serializing response", "error", err)
 		http.Error(w, "error serializing response", http.StatusInternalServerError)

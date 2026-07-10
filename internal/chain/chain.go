@@ -41,6 +41,11 @@ type Chain interface {
 	// be collapsed into a single upstream request (in-flight deduplication).
 	// Default-deny: only methods on the chain's read-only allowlist return true.
 	Coalesceable(method string) bool
+
+	// AllowMethod reports whether a client may call this method on this chain.
+	// Most chains allow everything; Bitcoin restricts clients to blockchain-query
+	// RPCs and rejects wallet/mining/control/etc. commands.
+	AllowMethod(method string) bool
 }
 
 var (

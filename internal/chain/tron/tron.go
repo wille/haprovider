@@ -39,6 +39,11 @@ func (c *Chain) Coalesceable(method string) bool {
 	return eth.Coalesceable(method)
 }
 
+// AllowMethod allows all methods; Tron endpoints are not filtered.
+func (c *Chain) AllowMethod(method string) bool {
+	return true
+}
+
 // Healthcheck batches the node-info RPCs (client version, chain id, block
 // height). Tron has no custom healthcheck beyond the node info. The returned
 // NodeInfo is populated with everything parsed so far, even when an error is

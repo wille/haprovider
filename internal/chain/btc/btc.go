@@ -40,6 +40,47 @@ func (c *Chain) Coalesceable(method string) bool {
 	return ok
 }
 
+// allowed is the set of Bitcoin RPCs a client may call through the proxy: the
+// read-only Blockchain-category queries plus transaction lookup and broadcast.
+// Everything else — wallet, mining, control, network administration, and the
+// mutating Blockchain commands (pruneblockchain, verifychain, scan*, ...) — is
+// rejected. See https://developer.bitcoin.org/reference/rpc/.
+var allowed = map[string]struct{}{
+	// Blockchain (read-only)
+	"getbestblockhash":      {},
+	"getblock":              {},
+	"getblockchaininfo":     {},
+	"getblockcount":         {},
+	"getblockfilter":        {},
+	"getblockhash":          {},
+	"getblockheader":        {},
+	"getblockstats":         {},
+	"getchaintips":          {},
+	"getchaintxstats":       {},
+	"getdeploymentinfo":     {},
+	"getdifficulty":         {},
+	"getmempoolancestors":   {},
+	"getmempooldescendants": {},
+	"getmempoolentry":       {},
+	"getmempoolinfo":        {},
+	"getrawmempool":         {},
+	"gettxout":              {},
+	"gettxoutproof":         {},
+	"gettxoutsetinfo":       {},
+	"gettxspendingprevout":  {},
+	"verifytxoutproof":      {},
+	// Rawtransactions: transaction lookup and broadcast
+	"getrawtransaction":  {},
+	"sendrawtransaction": {},
+}
+
+// AllowMethod reports whether a client may call this Bitcoin RPC. Only the
+// blockchain-query allowlist is permitted; all other commands are rejected.
+func (c *Chain) AllowMethod(method string) bool {
+	_, ok := allowed[method]
+	return ok
+}
+
 type networkInfo struct {
 	Subversion string `json:"subversion"`
 }
