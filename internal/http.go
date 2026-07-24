@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
@@ -21,6 +22,10 @@ import (
 // errCodeResourceUnavailable is the JSON-RPC error code ("Resource Unavailable")
 // returned when a chain does not allow a client to call a method.
 const errCodeResourceUnavailable = -32002
+
+// coalesceIDCounter assigns a unique id to each coalesced upstream call so its
+// "request" log line can be correlated to the group it served.
+var coalesceIDCounter atomic.Uint64
 
 func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	defer metrics.TrackInflight(endpoint.Name, "http")()
@@ -100,15 +105,20 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		writeForwardError(w, err, log)
 		return
 	}
+	logRequest(log, req, result, 0)
 	writeBatchResponse(w, endpoint, result.provider, result.res, log)
 }
 
-// forwardResult is the outcome of a successful failover: the upstream response
-// and the provider that served it. It is shared verbatim between coalesced
-// callers, so callers must not mutate its response before writing.
+// forwardResult is the outcome of a successful failover: the upstream response,
+// the provider that served it, and how long it took. It is shared verbatim
+// between coalesced callers, so callers must not mutate its response before
+// writing. coalesceID is set only for a coalesced call, and is logged only by
+// callers that actually shared it.
 type forwardResult struct {
-	res      *rpc.BatchResponse
-	provider *core.Provider
+	res        *rpc.BatchResponse
+	provider   *core.Provider
+	dur        time.Duration
+	coalesceID uint64
 }
 
 // errNoProvidersAvailable is returned by forwardWithFailover when every provider
@@ -153,12 +163,9 @@ NextProvider:
 			continue NextProvider
 		}
 
+		// The per-request "request" debug log is emitted by the caller (via
+		// logRequest) once the coalesce outcome is known, not here.
 		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).String())
-		if req.IsBatch {
-			reqLog.Debug("batch request", "size", len(req.Requests))
-		} else {
-			reqLog.Debug("request", "method", req.Requests[0].Method)
-		}
 
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
 		elapsed := time.Since(start).Seconds()
@@ -189,10 +196,25 @@ NextProvider:
 			continue NextProvider
 		}
 
-		return &forwardResult{res: res, provider: provider}, nil
+		return &forwardResult{res: res, provider: provider, dur: time.Since(start)}, nil
 	}
 
 	return nil, errNoProvidersAvailable
+}
+
+// logRequest emits the per-request debug log for a completed forward. A non-zero
+// coalesceID means the request was served by a shared (coalesced) upstream call
+// and the id identifies that group.
+func logRequest(log *slog.Logger, req *rpc.BatchRequest, result *forwardResult, coalesceID uint64) {
+	l := log.With("provider", result.provider.Name, "request_time", result.dur.String())
+	if coalesceID != 0 {
+		l = l.With("coalesced", coalesceID)
+	}
+	if req.IsBatch {
+		l.Debug("batch request", "size", len(req.Requests))
+	} else {
+		l.Debug("request", "method", req.Requests[0].Method)
+	}
 }
 
 // coalesceRequest routes a single coalesceable request through the endpoint's
@@ -207,7 +229,14 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 		// Detached context: one client disconnecting must not cancel the shared
 		// upstream call the other coalesced callers are waiting on. It stays bounded
 		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
-		return forwardWithFailover(context.WithoutCancel(ctx), endpoint, req, timing, log)
+		result, err := forwardWithFailover(context.WithoutCancel(ctx), endpoint, req, timing, log)
+		if err != nil {
+			return nil, err
+		}
+		// Assign a coalesce id up front; it is only logged by callers that turn out
+		// to actually share this call (sf.Shared).
+		result.coalesceID = coalesceIDCounter.Add(1)
+		return result, nil
 	})
 
 	select {
@@ -215,16 +244,21 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 		// This client left; the shared work continues for the others.
 		return
 	case sf := <-ch:
-		if sf.Shared {
-			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
-			log.Debug("request coalesced", "method", req.Requests[0].Method, "params", rpc.FormatRawBody(string(req.Requests[0].Params)))
-		}
 		if sf.Err != nil {
 			writeForwardError(w, sf.Err, log)
 			return
 		}
 
 		shared := sf.Val.(*forwardResult)
+
+		// The coalesce id is logged only when this request was genuinely shared
+		// with other callers.
+		var coalesceID uint64
+		if sf.Shared {
+			coalesceID = shared.coalesceID
+			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
+		}
+		logRequest(log, req, shared, coalesceID)
 		// Value-copy the shared response and stamp this client's id onto the copy;
 		// concurrent callers must never mutate the shared *rpc.Response.
 		resp := *shared.res.Responses[0]
