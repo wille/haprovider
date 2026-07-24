@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -41,7 +42,16 @@ type Endpoint struct {
 
 	// Public indicates that the endpoint is public and that we
 	// will skip sending debug headers and detailed error messages to the client.
+	// Note: public does NOT bypass authentication; it only controls debug output.
 	Public bool `yaml:"public,omitempty"`
+
+	// Keys are the inbound bearer tokens accepted for this endpoint (in addition
+	// to any global keys). Env references are expanded at config load.
+	Keys []string `yaml:"keys,omitempty"`
+
+	// authKeys is the effective set of accepted tokens (endpoint Keys + global
+	// keys), populated by InitAuth at config load.
+	authKeys []string
 
 	// AddXForwardedHeaders adds X-Forwarded-For header to requests sent to upstream providers
 	AddXForwardedHeaders bool `yaml:"add_xfwd_headers,omitempty"`
@@ -101,4 +111,27 @@ func (e *Endpoint) GetMaxResponseSize() int64 {
 		return *e.MaxResponseSize
 	}
 	return DefaultMaxResponseSize
+}
+
+// InitAuth sets the effective set of accepted inbound tokens for this endpoint:
+// its own Keys plus the given global keys. Called once at config load.
+func (e *Endpoint) InitAuth(globalKeys []string) {
+	e.authKeys = append(append([]string{}, e.Keys...), globalKeys...)
+}
+
+// RequiresAuth reports whether this endpoint has any accepted keys and therefore
+// requires callers to authenticate.
+func (e *Endpoint) RequiresAuth() bool {
+	return len(e.authKeys) > 0
+}
+
+// Authorized reports whether token matches one of the endpoint's accepted keys.
+// The comparison is constant-time to avoid leaking key material via timing.
+func (e *Endpoint) Authorized(token string) bool {
+	for _, k := range e.authKeys {
+		if k != "" && subtle.ConstantTimeCompare([]byte(token), []byte(k)) == 1 {
+			return true
+		}
+	}
+	return false
 }

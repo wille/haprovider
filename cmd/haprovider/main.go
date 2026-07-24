@@ -41,6 +41,15 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Authenticate before dispatching to any transport. This covers HTTP RPC, the
+	// TRON API path, and WebSocket upgrades (a failed WS auth returns 401 before
+	// the upgrade). Endpoints without configured keys are open.
+	if !internal.Authenticate(endpoint, r) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	// A trailing path (e.g. /tron/wallet/getnowblock) is a native HTTP API
 	// request that we forward verbatim to the provider. Only chains that expose
 	// a path-based HTTP API support this.
