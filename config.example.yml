@@ -21,6 +21,13 @@ port: :8080
 # log_level: info   # debug, info, warn, error
 # log_json: false
 
+# Inbound authentication (optional). Clients must send `Authorization: Bearer <key>`.
+# Keys listed here are accepted on every endpoint; values expand ${ENV_VAR}. List
+# several to rotate keys with no downtime. An endpoint is only protected if a key
+# applies to it (global or its own); otherwise it stays open.
+#keys:
+#  - ${HAPROVIDER_KEY}
+
 endpoints:
   # Ethereum mainnet. "eth" is the default kind, so it can be omitted.
   eth:
@@ -28,6 +35,9 @@ endpoints:
     # Cap upstream response size in bytes (default 100MB, 0 = unlimited). Raise it
     # if you query very large responses (wide eth_getLogs ranges, traces).
     #max_response_size: 104857600
+    # Keys accepted only for this endpoint, in addition to the global keys above.
+    #keys:
+    #  - ${ETH_SERVICE_KEY}
     providers:
       - name: PublicNode
         http: https://ethereum-rpc.publicnode.com

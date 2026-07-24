@@ -18,6 +18,10 @@ type Config struct {
 	Port                string                    `yaml:"port,omitempty"`
 	MetricsPort         string                    `yaml:"metrics_port,omitempty"`
 	HealthcheckInterval string                    `yaml:"healthcheck_interval,omitempty"`
+
+	// Keys are inbound bearer tokens accepted on every endpoint. Combined with
+	// each endpoint's own keys. Env references are expanded at load.
+	Keys []string `yaml:"keys,omitempty"`
 }
 
 func LoadConfig(configFile string) *Config {
@@ -38,11 +42,23 @@ func LoadConfig(configFile string) *Config {
 		panic(err)
 	}
 
+	// Expand env references in the global keys (e.g. "${HA_KEY}").
+	for i, k := range config.Keys {
+		config.Keys[i] = os.ExpandEnv(k)
+	}
+
 	// Add a reference to the endpoint in the provider
 	for endpointName, endpoint := range config.Endpoints {
 		if endpoint.Name == "" {
 			endpoint.Name = endpointName
 		}
+
+		// Expand env references in the endpoint keys, then compute the effective
+		// accepted-token set (endpoint keys + global keys).
+		for i, k := range endpoint.Keys {
+			endpoint.Keys[i] = os.ExpandEnv(k)
+		}
+		endpoint.InitAuth(config.Keys)
 
 		// Always default to eth for backwards compatibility
 		if endpoint.Kind == "" {

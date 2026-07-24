@@ -174,18 +174,61 @@ endpoints:
 - `healthcheck_interval`: How often each provider is health-checked (e.g. `10s`, `1m`) (default: 30s)
 - `log_level`: Logging level (debug, info, warn, error)
 - `log_json`: Enable JSON logs
+- `keys`: Global inbound API keys accepted on every endpoint (optional). See [Authentication](#authentication).
 - `endpoints`: Map of endpoint configurations
   - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API.
   - `chainId`: Network chain ID (optional, EVM chains)
   - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)
-  - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false)
+  - `keys`: Inbound API keys accepted for this endpoint, in addition to any global `keys` (optional). See [Authentication](#authentication).
+  - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false). Note: `public` does **not** disable authentication — if keys apply to the endpoint, a valid token is still required.
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `providers`: List of provider configurations
     - `name`: Provider identifier
     - `http`: HTTP endpoint URL (required)
     - `ws`: WebSocket endpoint URL (optional)
     - `timeout`: Request timeout (optional, default 10s)
+
+### Authentication
+
+haprovider can require callers to authenticate with a bearer token. Configure one or more
+keys, either globally or per endpoint:
+
+```yml
+# Accepted on every endpoint
+keys:
+  - ${HAPROVIDER_KEY}       # values support ${ENV_VAR} expansion
+
+endpoints:
+  eth:
+    chainId: "1"
+    # Additional keys accepted only on this endpoint (e.g. a per-service key)
+    keys:
+      - ${ETH_SERVICE_KEY}
+    providers:
+      - name: node
+        http: http://localhost:8545
+```
+
+Clients pass the token in the `Authorization` header:
+
+```
+Authorization: Bearer <key>
+```
+
+Behavior:
+
+- **Opt-in per endpoint.** An endpoint requires authentication only if it has keys that apply
+  to it (its own `keys` plus the global `keys`). Endpoints with no applicable keys stay open,
+  so existing setups keep working.
+- **Multiple keys** are accepted, which lets you rotate keys with no downtime or hand out
+  different keys to different services.
+- **Env expansion.** Key values are expanded with `os.ExpandEnv`, so you can keep secrets out
+  of the config file (`- ${HAPROVIDER_KEY}`).
+- Requests with a missing or invalid token get `401 Unauthorized`. Authentication is enforced
+  for HTTP JSON-RPC, the TRON HTTP API path, and WebSocket upgrades alike.
+- `public: true` does **not** bypass authentication — it only suppresses debug headers and
+  detailed error messages. A public endpoint with keys still requires a valid token.
 
 
 ### Command Line Options
