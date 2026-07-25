@@ -105,7 +105,7 @@ type mempoolInfo struct {
 }
 
 func (c *Chain) Healthcheck(ctx context.Context, p *core.Provider) (*core.NodeInfo, error) {
-	res, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
+	res, _, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
 		rpc.NewRequest("getnetworkinfo", "getnetworkinfo", []any{}),
 		rpc.NewRequest("getblockhash", "getblockhash", []any{0}),
 		rpc.NewRequest("getblockchaininfo", "getblockchaininfo", []any{}),
