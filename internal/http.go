@@ -106,7 +106,8 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		return
 	}
 	logRequest(log, req, result, 0)
-	writeBatchResponse(w, endpoint, result.provider, result.res, log)
+	// Forward the upstream body verbatim (ids are echoed, so no re-encode needed).
+	writeRaw(w, endpoint, result.provider, result.raw, log)
 }
 
 // forwardResult is the outcome of a successful failover: the upstream response,
@@ -116,6 +117,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 // callers that actually shared it.
 type forwardResult struct {
 	res        *rpc.BatchResponse
+	raw        []byte // the raw upstream body, forwarded to the client verbatim
 	provider   *core.Provider
 	dur        time.Duration
 	coalesceID uint64
@@ -124,6 +126,10 @@ type forwardResult struct {
 // errNoProvidersAvailable is returned by forwardWithFailover when every provider
 // is offline or has failed the request.
 var errNoProvidersAvailable = errors.New("no providers available")
+
+// errEmptyResponse is returned when a provider replies with no responses (an
+// empty batch). We refuse to forward it and return a 500 to the client.
+var errEmptyResponse = errors.New("empty response from provider")
 
 // forwardWithFailover runs the provider failover loop for req and returns the
 // first successful response and the provider that produced it. It records
@@ -140,7 +146,7 @@ NextProvider:
 		start := time.Now()
 
 		m := timing.NewMetric(provider.Name).Start()
-		res, err := httpx.SendRPCBatchRequest(ctx, provider, req)
+		res, raw, err := httpx.SendRPCBatchRequest(ctx, provider, req)
 		m.Stop()
 
 		// Client connection closed (or, for a coalesced call, the detached
@@ -196,7 +202,14 @@ NextProvider:
 			continue NextProvider
 		}
 
-		return &forwardResult{res: res, provider: provider, dur: time.Since(start)}, nil
+		// A response with no elements is invalid; don't forward it. (Batches with a
+		// count mismatch are already handled above, so this catches single requests.)
+		if len(res.Responses) == 0 {
+			reqLog.Error("empty response from provider")
+			return nil, errEmptyResponse
+		}
+
+		return &forwardResult{res: res, raw: raw, provider: provider, dur: time.Since(start)}, nil
 	}
 
 	return nil, errNoProvidersAvailable
@@ -259,8 +272,16 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 			metrics.RecordCoalescedRequest(endpoint.Name, req.Requests[0].Method)
 		}
 		logRequest(log, req, shared, coalesceID)
-		// Value-copy the shared response and stamp this client's id onto the copy;
-		// concurrent callers must never mutate the shared *rpc.Response.
+
+		// If this caller's id matches the shared response's id (the leader, and any
+		// non-shared call), the upstream body is already correct — forward it
+		// verbatim, no re-encode. Only a genuinely-shared follower with a different
+		// id needs the response rebuilt with its own id.
+		if req.Requests[0].GetID() == shared.res.Responses[0].GetID() {
+			writeRaw(w, endpoint, shared.provider, shared.raw, log)
+			return
+		}
+
 		resp := *shared.res.Responses[0]
 		resp.ID = req.Requests[0].ID
 		writeBatchResponse(w, endpoint, shared.provider, rpc.NewBatchResponse(&resp), log)
@@ -284,8 +305,29 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 		return
 	}
 
+	if errors.Is(err, errEmptyResponse) {
+		log.Error("empty response from provider")
+		http.Error(w, "empty response from provider", http.StatusInternalServerError)
+		return
+	}
+
 	log.Error("request failed", "error", err)
 	http.Error(w, "request failed", http.StatusInternalServerError)
+}
+
+// writeRaw forwards the raw upstream response body to the client verbatim,
+// setting the X-Provider header (unless the endpoint is public) and content type.
+// This avoids re-encoding the (potentially large) response.
+func writeRaw(w http.ResponseWriter, endpoint *core.Endpoint, provider *core.Provider, raw []byte, log *slog.Logger) {
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if _, err := w.Write(raw); err != nil {
+		log.Error("error writing body", "error", err)
+	}
 }
 
 // writeBatchResponse serializes res and writes it to the client, setting the

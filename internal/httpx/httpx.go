@@ -150,11 +150,13 @@ func SendHTTPRequest(ctx context.Context, provider *core.Provider, rawURL string
 }
 
 // SendRPCBatchRequest sends a JSON-RPC batch request to the provider's configured
-// HTTP endpoint and decodes the batch response.
-func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRequest) (*rpc.BatchResponse, error) {
+// HTTP endpoint and decodes the batch response. It also returns the raw upstream
+// body so callers can forward it to the client verbatim (avoiding a re-encode);
+// the raw bytes are nil on error.
+func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRequest) (*rpc.BatchResponse, []byte, error) {
 	body, err := rpc.SerializeBatchRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize request: %w", err)
+		return nil, nil, fmt.Errorf("failed to serialize request: %w", err)
 	}
 
 	targetUrl := p.Http
@@ -169,18 +171,18 @@ func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRe
 		if response != nil && len(response.Responses) > 0 {
 			_, message := response.Responses[0].GetError()
 			if message != nil {
-				return nil, fmt.Errorf("%s: %s", err, message)
+				return nil, nil, fmt.Errorf("%s: %s", err, message)
 			}
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	response, err := rpc.DecodeBatchResponse(b)
 	if err != nil {
-		return nil, fmt.Errorf("bad response: %w, raw: %s", err, string(b))
+		return nil, nil, fmt.Errorf("bad response: %w, raw: %s", err, string(b))
 	}
 
-	return response, nil
+	return response, b, nil
 }
 
 // ForwardHTTPRequest forwards a request to an explicit upstream URL, preserving the method

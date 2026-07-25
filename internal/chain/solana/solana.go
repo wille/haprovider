@@ -81,7 +81,7 @@ func (c *Chain) HandleError(code int, message string) error {
 // together with the chain-specific getHealth check. The returned NodeInfo is
 // populated with everything parsed so far, even when an error is returned.
 func (c *Chain) Healthcheck(ctx context.Context, p *core.Provider) (*core.NodeInfo, error) {
-	res, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
+	res, _, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
 		rpc.NewRequest("ha_version", "getVersion", nil),
 		rpc.NewRequest("ha_chainId", "getGenesisHash", nil),
 		rpc.NewRequest("ha_height", "getBlockHeight", nil),

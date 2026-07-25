@@ -94,7 +94,7 @@ func (c Ethereum) ValidateConfig(e *core.Endpoint) error {
 // together with the chain-specific eth_syncing check. The returned NodeInfo is
 // populated with everything parsed so far, even when an error is returned.
 func (c *Ethereum) Healthcheck(ctx context.Context, p *core.Provider) (*core.NodeInfo, error) {
-	res, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
+	res, _, err := httpx.SendRPCBatchRequest(ctx, p, rpc.NewBatchRequest(
 		rpc.NewRequest("ha_clientVersion", "web3_clientVersion", []string{}),
 		rpc.NewRequest("ha_chainId", "eth_chainId", nil),
 		rpc.NewRequest("ha_height", "eth_blockNumber", nil),
