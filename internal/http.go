@@ -125,6 +125,11 @@ type forwardResult struct {
 // is offline or has failed the request.
 var errNoProvidersAvailable = errors.New("no providers available")
 
+// errRequestTooLarge is returned when every provider rejected the request as too
+// large (HTTP 413). The request, not the provider, is the problem, so it maps to
+// a 413 for the client and never marks a provider unhealthy.
+var errRequestTooLarge = errors.New("request too large")
+
 // noProviderForMethodError is returned by forwardWithFailover when every provider
 // has reported it does not support one or more of the requested methods, so the
 // request cannot be served. The client receives a JSON-RPC "method not found"
@@ -185,6 +190,10 @@ func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.
 	// the generic "no providers available".
 	methodUnsupported := false
 
+	// Set when a provider rejected the request as too large (HTTP 413), so
+	// exhaustion returns a 413 rather than "no providers available".
+	requestTooLarge := false
+
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
@@ -222,6 +231,18 @@ NextProvider:
 				provider.MarkMethodUnsupported(req.Requests[0].Method)
 				methodUnsupported = true
 				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Requests[0].Method)
+				continue NextProvider
+			}
+
+			// The provider rejected the request as too large (HTTP 413). That's a
+			// property of the request, not the provider's health; another provider
+			// may have a larger limit, so fail over WITHOUT marking it unhealthy. If
+			// none accept it, the loop returns errRequestTooLarge.
+			var se *httpx.StatusError
+			if errors.As(err, &se) && se.Code == http.StatusRequestEntityTooLarge {
+				log.Warn("provider rejected request as too large", "provider", provider.Name)
+				requestTooLarge = true
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
 				continue NextProvider
 			}
 
@@ -292,6 +313,10 @@ NextProvider:
 		if missing := methodsWithoutProvider(endpoint, req); len(missing) > 0 {
 			return nil, &noProviderForMethodError{methods: missing}
 		}
+	}
+
+	if requestTooLarge {
+		return nil, errRequestTooLarge
 	}
 
 	return nil, errNoProvidersAvailable
@@ -376,6 +401,14 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
 			log.Error("error writing body", "error", werr)
 		}
+		return
+	}
+
+	// Every provider rejected the request as too large: the request is the
+	// problem, not the providers, so return a 413 (and none were marked unhealthy).
+	if errors.Is(err, errRequestTooLarge) {
+		log.Warn("request too large for all providers")
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

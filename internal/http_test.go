@@ -166,6 +166,43 @@ func TestClientError_ReturnedNotUnhealthy(t *testing.T) {
 	assert.True(t, a.RateLimitedUntil.IsZero())
 }
 
+// TestRequestTooLarge_NotUnhealthy: an HTTP 413 from every provider returns a 413
+// to the client and leaves all providers online — the request is too big, the
+// providers are fine.
+func TestRequestTooLarge_NotUnhealthy(t *testing.T) {
+	ep, a, b := twoRawEndpoint(t, http.StatusRequestEntityTooLarge, "request entity too large")
+
+	w := doRPC(ep, getLogsReq)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	assert.True(t, a.IsOnline(), "a 413 must not mark the provider unhealthy")
+	assert.True(t, b.IsOnline())
+	assert.True(t, a.RateLimitedUntil.IsZero())
+	assert.True(t, b.RateLimitedUntil.IsZero())
+}
+
+// TestRequestTooLarge_FailsOver: a provider with a smaller limit (413) is skipped,
+// not lost, and the request succeeds on a provider that accepts it.
+func TestRequestTooLarge_FailsOver(t *testing.T) {
+	srvA := rawStatusProvider(t, http.StatusRequestEntityTooLarge, "request entity too large")
+	srvB := rpctest.NewServer(map[string]any{"eth_getLogs": []any{"0xlog"}}, nil)
+	t.Cleanup(srvB.Close)
+
+	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth}
+	a := &core.Provider{Name: "a", Http: srvA.URL, Endpoint: ep}
+	b := &core.Provider{Name: "b", Http: srvB.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{a, b}
+	a.MarkHealthy(0)
+	b.MarkHealthy(0)
+
+	w := doRPC(ep, getLogsReq)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "0xlog")
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.True(t, a.IsOnline(), "a 413 must not lose the provider")
+}
+
 // TestMethodNotSupported_Status501: a provider reporting the method as HTTP 501
 // with no usable body is skipped (not lost) and the request fails over.
 func TestMethodNotSupported_Status501(t *testing.T) {
