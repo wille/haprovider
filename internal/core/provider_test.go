@@ -355,3 +355,37 @@ func TestProviderConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestSupportsMethod verifies per-provider unsupported-method tracking and its
+// TTL-based re-probe.
+func TestSupportsMethod(t *testing.T) {
+	p := rlProvider()
+
+	// Unknown methods are supported by default.
+	assert.True(t, p.SupportsMethod("eth_getLogs"))
+
+	// A flagged method is skipped.
+	p.MarkMethodUnsupported("eth_getLogs")
+	assert.False(t, p.SupportsMethod("eth_getLogs"))
+	// Other methods are unaffected.
+	assert.True(t, p.SupportsMethod("eth_blockNumber"))
+
+	// An empty method is a no-op.
+	p.MarkMethodUnsupported("")
+	assert.True(t, p.SupportsMethod(""))
+}
+
+// TestSupportsMethod_TTLReprobe verifies a flag older than the TTL is cleared and
+// the method is re-probed.
+func TestSupportsMethod_TTLReprobe(t *testing.T) {
+	old := core.DefaultUnsupportedMethodTTL
+	core.DefaultUnsupportedMethodTTL = 20 * time.Millisecond
+	t.Cleanup(func() { core.DefaultUnsupportedMethodTTL = old })
+
+	p := rlProvider()
+	p.MarkMethodUnsupported("eth_getLogs")
+	assert.False(t, p.SupportsMethod("eth_getLogs"))
+
+	assert.Eventually(t, func() bool { return p.SupportsMethod("eth_getLogs") },
+		time.Second, 5*time.Millisecond, "flag should expire and re-probe")
+}

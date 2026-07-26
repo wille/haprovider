@@ -165,6 +165,33 @@ func TestIncomingWebsocketHandler_InternalError(t *testing.T) {
 	assert.True(t, p.GetNextCheckTime().IsZero(), "internal error must not set a rate-limit window")
 }
 
+// TestIncomingWebsocketHandler_MethodNotSupported: an in-band "method not
+// supported" (-32604) is forwarded to the client and flags the method on the
+// provider, without marking the provider unhealthy or closing the connection.
+func TestIncomingWebsocketHandler_MethodNotSupported(t *testing.T) {
+	methods := healthyWSMethods()
+	methods["eth_getLogs"] = rpctest.RPCError{Code: -32604, Message: "this request method is not supported"}
+	p := wsProvider(t, "p", methods, http.StatusSwitchingProtocols)
+	ep := wsEndpoint(t, p)
+
+	c, _ := dial(t, proxyURL(t, ep))
+	sendRPC(t, c, "1", "eth_getLogs")
+
+	res := readRPC(t, c)
+	assert.Equal(t, "1", res.GetID())
+	assert.True(t, res.IsError(), "the unsupported-method error is forwarded to the client")
+
+	assert.Eventually(t, func() bool { return !p.SupportsMethod("eth_getLogs") },
+		time.Second, 10*time.Millisecond, "provider should be flagged as not supporting the method")
+	assert.True(t, p.IsOnline(), "provider must stay online on an unsupported method")
+
+	// The connection stays usable for other methods.
+	sendRPC(t, c, "2", "eth_blockNumber")
+	res = readRPC(t, c)
+	assert.Equal(t, "0x10", resultString(t, res))
+	assert.True(t, p.IsOnline())
+}
+
 // TestIncomingWebsocketHandler_DialFailover: when the first provider rejects the
 // handshake, the proxy fails over to the next healthy provider and serves the
 // client through it.

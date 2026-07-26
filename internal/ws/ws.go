@@ -175,18 +175,27 @@ func (proxy *WebSocketProxy) writeResponse(res *rpc.Response) {
 }
 
 func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
+	// pending maps an in-flight request id to its method, so a "method not
+	// supported" error response (which carries no method) can be attributed to the
+	// method that caused it. Owned solely by this goroutine — both request-send and
+	// response-receive happen here — so it needs no lock. It's connection-scoped:
+	// entries for responses that never arrive are freed when the goroutine exits.
+	pending := make(map[string]string)
+
 	for {
 		select {
 		case <-providerClient.ctx.Done():
 			return
 		case req := <-proxy.Requests:
 			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
+			pending[req.GetID()] = req.Method
 			proxy.writeRequest(providerClient, req)
 
 			// Flush any remaining requests
 			for i := 0; i < len(proxy.Requests); i++ {
 				req := <-proxy.Requests
 				metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
+				pending[req.GetID()] = req.Method
 				proxy.writeRequest(providerClient, req)
 			}
 
@@ -200,14 +209,24 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				return
 			}
 
+			// Attribute the response to its request's method (empty for
+			// notifications, which carry no id).
+			method := pending[rpcResponse.GetID()]
+			delete(pending, rpcResponse.GetID())
+
 			if rpcResponse.IsError() {
-				metrics.RecordFailedRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", "")
+				metrics.RecordFailedRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", method)
 
 				errorCode, errorMessage := rpcResponse.GetError()
 
-				err := chain.New(proxy.endpoint.Kind).HandleError(errorCode, errorMessage.Error())
-
-				if err != nil {
+				if rpc.IsMethodNotSupported(errorCode) {
+					// The provider doesn't support this method: record it (shared with
+					// the HTTP failover loop and future dials) and forward the error to
+					// the client. Do NOT mark the provider unhealthy — it works, it just
+					// lacks this method.
+					proxy.provider.MarkMethodUnsupported(method)
+					proxy.log.Debug("method not supported by provider", "method", method, "error_code", errorCode)
+				} else if err := chain.New(proxy.endpoint.Kind).HandleError(errorCode, errorMessage.Error()); err != nil {
 					proxy.provider.MarkUnhealthy(err)
 					proxy.Responses <- rpcResponse
 					proxy.Close(err)

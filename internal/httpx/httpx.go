@@ -7,6 +7,7 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,17 @@ import (
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/rpc"
 )
+
+// StatusError is returned when an upstream responds with a non-2xx status that
+// isn't a rate limit (429/402). It carries the status code so callers can
+// special-case e.g. 501 Not Implemented.
+type StatusError struct {
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("http %d", e.Code)
+}
 
 // Version is the haprovider build version, set via -ldflags at build time.
 var Version = "dev"
@@ -137,16 +149,30 @@ func SendHTTPRequest(ctx context.Context, provider *core.Provider, rawURL string
 	switch resp.StatusCode {
 	case http.StatusOK:
 		break
-	case http.StatusTooManyRequests:
-		// Handle 429 on the request level. Some providers will 429, others will return 200 but a rate limit error in the response.
+	case http.StatusTooManyRequests, http.StatusPaymentRequired:
+		// Rate limit / quota exhausted: back off instead of failing hard. Some
+		// providers 429, others return 200 with a rate-limit error in the body
+		// (handled in-band); 402 means the paid quota is used up.
 		return b, provider.HandleTooManyRequests(resp)
-	case http.StatusRequestEntityTooLarge:
-		fallthrough
 	default:
-		return b, fmt.Errorf("http %d", resp.StatusCode)
+		return b, &StatusError{Code: resp.StatusCode}
 	}
 
 	return b, nil
+}
+
+// responseHasError reports whether any response in the decoded batch carries a
+// JSON-RPC error.
+func responseHasError(r *rpc.BatchResponse) bool {
+	if r == nil {
+		return false
+	}
+	for _, resp := range r.Responses {
+		if resp.IsError() {
+			return true
+		}
+	}
+	return false
 }
 
 // SendRPCBatchRequest sends a JSON-RPC batch request to the provider's configured
@@ -164,14 +190,30 @@ func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRe
 
 	b, err := SendHTTPRequest(ctx, p, targetUrl, body)
 	if err != nil {
-		// Try to parse a RPC error response
-		response, _ := rpc.DecodeBatchResponse(b)
-		if response != nil && len(response.Responses) > 0 {
-			_, message := response.Responses[0].GetError()
-			if message != nil {
-				return nil, fmt.Errorf("%s: %s", err, message)
-			}
+		// Rate limited / quota (HTTP 429, 402): keep as-is so the caller backs off.
+		var rl *rpc.ErrorRateLimited
+		if errors.As(err, &rl) {
+			return nil, err
 		}
+
+		// When the body is a valid JSON-RPC error, the RPC error code — not the
+		// HTTP status — is the source of truth. Return it as an in-band response so
+		// the failover loop classifies it by code: client errors (invalid params,
+		// parse error) go back to the client, unsupported methods trigger
+		// skip-not-lose, and only genuine server errors mark the provider unhealthy.
+		// This stops a single malformed request from marking every provider
+		// unhealthy just because a provider wrapped its error in a non-2xx status.
+		if response, decErr := rpc.DecodeBatchResponse(b); decErr == nil && responseHasError(response) {
+			return response, nil
+		}
+
+		// A "not implemented" status with no usable body: surface it so a single
+		// request can skip the provider for this method without losing it.
+		var se *StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotImplemented {
+			return nil, &rpc.MethodNotSupportedError{Code: rpc.CodeMethodNotSupported, Message: err.Error()}
+		}
+
 		return nil, err
 	}
 

@@ -125,15 +125,76 @@ type forwardResult struct {
 // is offline or has failed the request.
 var errNoProvidersAvailable = errors.New("no providers available")
 
+// noProviderForMethodError is returned by forwardWithFailover when every provider
+// has reported it does not support one or more of the requested methods, so the
+// request cannot be served. The client receives a JSON-RPC "method not found"
+// error naming the offending method(s).
+type noProviderForMethodError struct {
+	methods []string
+}
+
+func (e *noProviderForMethodError) Error() string {
+	return "no provider available for method " + strings.Join(e.methods, ", ")
+}
+
+// supportsAllMethods reports whether provider currently supports every method in
+// req (none is on its unsupported list).
+func supportsAllMethods(provider *core.Provider, req *rpc.BatchRequest) bool {
+	for _, sub := range req.Requests {
+		if !provider.SupportsMethod(sub.Method) {
+			return false
+		}
+	}
+	return true
+}
+
+// methodsWithoutProvider returns the requested methods that no provider supports,
+// regardless of provider health. An empty result means the methods are supported
+// somewhere and any failure was an availability problem, not a capability one.
+func methodsWithoutProvider(endpoint *core.Endpoint, req *rpc.BatchRequest) []string {
+	var missing []string
+	seen := make(map[string]bool)
+	for _, sub := range req.Requests {
+		if seen[sub.Method] {
+			continue
+		}
+		seen[sub.Method] = true
+
+		supported := false
+		for _, provider := range endpoint.Providers {
+			if provider.SupportsMethod(sub.Method) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			missing = append(missing, sub.Method)
+		}
+	}
+	return missing
+}
+
 // forwardWithFailover runs the provider failover loop for req and returns the
 // first successful response and the provider that produced it. It records
 // per-request metrics and marks providers unhealthy on failure. It returns
 // ctx.Err() if the context is cancelled mid-flight, or errNoProvidersAvailable
 // when no provider could serve the request.
 func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
+	// Set when at least one provider skipped or rejected a requested method as
+	// unsupported, so exhaustion can report "no provider for method X" instead of
+	// the generic "no providers available".
+	methodUnsupported := false
+
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
+			continue
+		}
+
+		// Skip a provider we already know doesn't support a requested method;
+		// another provider may. If none do, we return a noProviderForMethodError.
+		if !supportsAllMethods(provider, req) {
+			methodUnsupported = true
 			continue
 		}
 
@@ -152,6 +213,18 @@ NextProvider:
 		}
 
 		if err != nil {
+			// The provider reported (even via a non-2xx status) that it doesn't
+			// support this method: record it and fail over WITHOUT marking the
+			// provider unhealthy. Only attributable for a single request; a batch
+			// transport error falls through to the generic failure below.
+			var mns *rpc.MethodNotSupportedError
+			if errors.As(err, &mns) && len(req.Requests) == 1 {
+				provider.MarkMethodUnsupported(req.Requests[0].Method)
+				methodUnsupported = true
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Requests[0].Method)
+				continue NextProvider
+			}
+
 			// In a high traffic environment, the provider might be taken offline by another concurrent request
 			if provider.IsOnline() {
 				provider.MarkUnhealthy(err)
@@ -178,16 +251,32 @@ NextProvider:
 			}
 		}
 
-		for _, sub := range res.Responses {
-			if sub.IsError() {
-				errorCode, errorMessage := sub.GetError()
-				reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
-
-				if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
-					provider.MarkUnhealthy(herr)
-					continue NextProvider
-				}
+		// An in-band "method not supported" error means skip this provider for that
+		// method and fail over, without marking it unhealthy. Scan every sub-request
+		// first so all unsupported methods in a batch are recorded before moving on.
+		methodNotSupported := false
+		for i, sub := range res.Responses {
+			if !sub.IsError() {
+				continue
 			}
+
+			errorCode, errorMessage := sub.GetError()
+			reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+
+			if rpc.IsMethodNotSupported(errorCode) {
+				provider.MarkMethodUnsupported(req.Requests[i].Method)
+				methodUnsupported = true
+				methodNotSupported = true
+				continue
+			}
+
+			if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
+				provider.MarkUnhealthy(herr)
+				continue NextProvider
+			}
+		}
+		if methodNotSupported {
+			continue NextProvider
 		}
 
 		if req.IsBatch && len(res.Responses) != len(req.Requests) {
@@ -197,6 +286,12 @@ NextProvider:
 		}
 
 		return &forwardResult{res: res, provider: provider, dur: time.Since(start)}, nil
+	}
+
+	if methodUnsupported {
+		if missing := methodsWithoutProvider(endpoint, req); len(missing) > 0 {
+			return nil, &noProviderForMethodError{methods: missing}
+		}
 	}
 
 	return nil, errNoProvidersAvailable
@@ -279,6 +374,21 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
+			log.Error("error writing body", "error", werr)
+		}
+		return
+	}
+
+	// No provider supports the requested method: 501 with a JSON-RPC "method not
+	// found" error naming it. The method is unavailable, not transiently down, so
+	// this is distinct from the 503 above.
+	var nom *noProviderForMethodError
+	if errors.As(err, &nom) {
+		log.Error("no provider available for method", "methods", nom.methods)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotImplemented)
+		resp := &rpc.Response{Version: "2.0", ID: nil, Error: rpc.NewError(rpc.CodeMethodNotFound, err.Error())}
+		if werr := rpc.WriteResponse(w, resp); werr != nil {
 			log.Error("error writing body", "error", werr)
 		}
 		return

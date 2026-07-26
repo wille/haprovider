@@ -30,6 +30,35 @@ var ErrorResponseNoProvidersAvailable = Response{
 	Error:   NewError(-39200, "no providers available"),
 }
 
+// Method-not-supported JSON-RPC error codes. CodeMethodNotFound is the JSON-RPC
+// 2.0 standard "Method not found"; CodeMethodNotSupported is used by some
+// providers (e.g. QuickNode) for "this request method is not supported".
+const (
+	CodeMethodNotFound     = -32601
+	CodeMethodNotSupported = -32604
+)
+
+// IsMethodNotSupported reports whether a JSON-RPC error code means the provider
+// does not support the requested method.
+func IsMethodNotSupported(code int) bool {
+	return code == CodeMethodNotFound || code == CodeMethodNotSupported
+}
+
+// MethodNotSupportedError signals that a provider reported (via a JSON-RPC error
+// code) that it does not support the requested method, even when the transport
+// returned a non-2xx status. The failover loop uses it to skip the provider for
+// this method without marking it unhealthy.
+type MethodNotSupportedError struct {
+	Code    int
+	Message string
+}
+
+var _ error = (*MethodNotSupportedError)(nil)
+
+func (e *MethodNotSupportedError) Error() string {
+	return fmt.Sprintf("method not supported: rpc %d: %s", e.Code, e.Message)
+}
+
 type ErrorRateLimited struct {
 	Message    string
 	RetryAfter time.Duration
