@@ -10,6 +10,7 @@ import (
 	servertiming "github.com/mitchellh/go-server-timing"
 	"github.com/stretchr/testify/assert"
 	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/rpc"
 	"github.com/wille/haprovider/internal/rpctest"
 )
 
@@ -68,6 +69,43 @@ func twoRawEndpoint(t *testing.T, status int, body string) (*core.Endpoint, *cor
 	a.MarkHealthy(0)
 	b.MarkHealthy(0)
 	return ep, a, b
+}
+
+// assertRPCError decodes w's body as a JSON-RPC response and asserts it carries
+// an error with the given code — i.e. the proxy returned a structured JSON-RPC
+// error, not a plain-text body.
+func assertRPCError(t *testing.T, w *httptest.ResponseRecorder, code int) {
+	t.Helper()
+	res, err := rpc.DecodeResponse(w.Body.Bytes())
+	assert.NoError(t, err, "body should be a JSON-RPC response, got %q", w.Body.String())
+	if assert.True(t, res.IsError(), "response should be an error") {
+		got, _ := res.GetError()
+		assert.Equal(t, code, got)
+	}
+}
+
+// TestRPCErrorEnvelopes: request-level failures the proxy detects itself are
+// returned as JSON-RPC error envelopes, not plain text.
+func TestRPCErrorEnvelopes(t *testing.T) {
+	endpoint, _ := handlerEndpoint(t, map[string]any{"eth_blockNumber": "0x10"})
+
+	post := func(contentType, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(body))
+		r.Header.Set("Content-Type", contentType)
+		w := httptest.NewRecorder()
+		IncomingHttpRpcHandler(context.Background(), endpoint, w, r, &servertiming.Header{})
+		return w
+	}
+
+	// Invalid content type -> Invalid Request.
+	w := post("text/plain", blockNumberReq)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assertRPCError(t, w, rpc.CodeInvalidRequest)
+
+	// Unparseable body -> Parse error.
+	w = post("application/json", "{not json")
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assertRPCError(t, w, rpc.CodeParseError)
 }
 
 func doRPC(endpoint *core.Endpoint, body string) *httptest.ResponseRecorder {
@@ -147,6 +185,25 @@ func TestMethodNotSupported_Transport400(t *testing.T) {
 	assert.False(t, a.SupportsMethod("eth_getLogs"))
 }
 
+// TestMethodNotSupported_ChainSpecificCode: a provider-specific not-supported
+// code mapped by the chain's HandleError (QuickNode's -32004 on EVM) is treated
+// like the shared codes — skip-not-lose to another provider, no unhealthy.
+func TestMethodNotSupported_ChainSpecificCode(t *testing.T) {
+	endpoint, a, _ := twoProviderEndpoint(t,
+		map[string]any{"eth_getLogs": rpctest.RPCError{Code: -32004, Message: "the method does not exist/is not supported"}},
+		map[string]any{"eth_getLogs": []any{"0xlog"}},
+	)
+
+	w := doRPC(endpoint, getLogsReq)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "0xlog")
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.True(t, a.IsOnline(), "provider A must not be lost over an unsupported method")
+	assert.True(t, a.RateLimitedUntil.IsZero())
+	assert.False(t, a.SupportsMethod("eth_getLogs"), "A should be flagged as not supporting the method")
+}
+
 // TestClientError_ReturnedNotUnhealthy: a request-level error (invalid params)
 // returned as HTTP 400 with a JSON-RPC body is handed back to the client, not
 // treated as a provider failure. A single bad request must not knock providers
@@ -201,6 +258,59 @@ func TestRequestTooLarge_FailsOver(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "0xlog")
 	assert.Equal(t, "b", w.Header().Get("X-Provider"))
 	assert.True(t, a.IsOnline(), "a 413 must not lose the provider")
+}
+
+// solanaTwoProviders builds a Solana endpoint with two online providers backed by
+// the given method maps.
+func solanaTwoProviders(t *testing.T, methodsA, methodsB map[string]any) (*core.Endpoint, *core.Provider, *core.Provider) {
+	srvA := rpctest.NewServer(methodsA, nil)
+	srvB := rpctest.NewServer(methodsB, nil)
+	t.Cleanup(srvA.Close)
+	t.Cleanup(srvB.Close)
+
+	ep := &core.Endpoint{Name: "test", Kind: core.KindSolana}
+	a := &core.Provider{Name: "a", Http: srvA.URL, Endpoint: ep}
+	b := &core.Provider{Name: "b", Http: srvB.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{a, b}
+	a.MarkHealthy(0)
+	b.MarkHealthy(0)
+	return ep, a, b
+}
+
+const getBlockReq = `{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[123]}`
+
+// TestTryNextProvider_FailsOver: a Solana -32009 (slot missing in long-term
+// storage) from provider A fails over to a provider that has the block, without
+// marking A unhealthy or caching the method as unsupported.
+func TestTryNextProvider_FailsOver(t *testing.T) {
+	ep, a, _ := solanaTwoProviders(t,
+		map[string]any{"getBlock": rpctest.RPCError{Code: -32009, Message: "Slot 123 was skipped"}},
+		map[string]any{"getBlock": map[string]any{"blockhash": "abc"}},
+	)
+
+	w := doRPC(ep, getBlockReq)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "blockhash")
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.True(t, a.IsOnline(), "a data-availability miss must not mark the provider unhealthy")
+	assert.True(t, a.RateLimitedUntil.IsZero())
+	assert.True(t, a.SupportsMethod("getBlock"), "must not be cached as unsupported")
+}
+
+// TestTryNextProvider_AllUnavailable: when no provider has the block, the upstream
+// error is returned to the client (not a 503), and providers stay online.
+func TestTryNextProvider_AllUnavailable(t *testing.T) {
+	unavailable := map[string]any{"getBlock": rpctest.RPCError{Code: -32009, Message: "Slot 123 was skipped"}}
+	ep, a, b := solanaTwoProviders(t, unavailable, unavailable)
+
+	w := doRPC(ep, getBlockReq)
+
+	assert.Equal(t, http.StatusOK, w.Code, "the upstream error is returned as a JSON-RPC error")
+	assert.Contains(t, w.Body.String(), "-32009")
+	assert.Contains(t, w.Body.String(), "was skipped")
+	assert.True(t, a.IsOnline(), "data unavailability must not mark providers unhealthy")
+	assert.True(t, b.IsOnline())
 }
 
 // TestMethodNotSupported_Status501: a provider reporting the method as HTTP 501

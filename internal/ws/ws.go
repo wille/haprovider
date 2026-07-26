@@ -219,20 +219,29 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 
 				errorCode, errorMessage := rpcResponse.GetError()
 
-				if rpc.IsMethodNotSupported(errorCode) {
-					// The provider doesn't support this method: record it (shared with
-					// the HTTP failover loop and future dials) and forward the error to
-					// the client. Do NOT mark the provider unhealthy — it works, it just
-					// lacks this method.
-					proxy.provider.MarkMethodUnsupported(method)
-					proxy.log.Debug("method not supported by provider", "method", method, "error_code", errorCode)
-				} else if err := chain.New(proxy.endpoint.Kind).HandleError(errorCode, errorMessage.Error()); err != nil {
-					proxy.provider.MarkUnhealthy(err)
-					proxy.Responses <- rpcResponse
-					proxy.Close(err)
-					proxy.ClientConn.Close(websocket.CloseServiceRestart, err)
-					proxy.ProviderConn.Close(websocket.CloseTryAgainLater, nil)
-					return
+				if err := chain.New(proxy.endpoint.Kind).HandleError(errorCode, errorMessage.Error()); err != nil {
+					var mns *rpc.MethodNotSupportedError
+					var tryNext *rpc.ErrorTryNextProvider
+					if errors.As(err, &mns) {
+						// The chain reports the method isn't supported: record it (shared
+						// with the HTTP path and future dials) and forward the error to the
+						// client. Do NOT mark the provider unhealthy — it works, it just
+						// lacks this method.
+						proxy.provider.MarkMethodUnsupported(method)
+						proxy.log.Warn("method not supported by provider", "method", method, "error_code", errorCode)
+					} else if errors.As(err, &tryNext) {
+						// The provider can't serve this specific request. A pinned WS
+						// connection has no per-request failover, so forward the error to
+						// the client and keep the connection — don't mark it unhealthy.
+						proxy.log.Warn("provider cannot serve request", "method", method, "error_code", errorCode)
+					} else {
+						proxy.provider.MarkUnhealthy(err)
+						proxy.Responses <- rpcResponse
+						proxy.Close(err)
+						proxy.ClientConn.Close(websocket.CloseServiceRestart, err)
+						proxy.ProviderConn.Close(websocket.CloseTryAgainLater, nil)
+						return
+					}
 				} else {
 					proxy.log.Debug("error response", "error_code", errorCode, "error_message", errorMessage, "raw_error", rpcResponse.Error)
 				}
@@ -351,6 +360,17 @@ func (proxy *WebSocketProxy) DialAnyProvider(e *core.Endpoint, timing *servertim
 	return nil, ErrNoProvidersAvailable
 }
 
+// writeHandshakeError writes a JSON-RPC error response for a failure that occurs
+// before the WebSocket is upgraded (e.g. no provider to dial). The client's
+// upgrade fails with this HTTP status, and a client that inspects the body gets a
+// structured JSON-RPC error rather than plain text.
+func writeHandshakeError(w http.ResponseWriter, status, code int, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	resp := &rpc.Response{Version: "2.0", ID: nil, Error: rpc.NewError(code, message)}
+	_ = rpc.WriteResponse(w, resp)
+}
+
 func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	start := time.Now()
 
@@ -361,10 +381,10 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		log:           endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
-		ctx:           ctx,
-		cancel:        cancel,
-		endpoint:      endpoint,
+		log:       endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
+		ctx:       ctx,
+		cancel:    cancel,
+		endpoint:  endpoint,
 		Responses: make(chan *rpc.Response, 32),
 		Requests:  make(chan *rpc.Request, 32),
 	}
@@ -374,7 +394,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 
 	if err == ErrNoProvidersAvailable {
 		proxy.log.Error("no providers available")
-		http.Error(w, "no providers available", http.StatusServiceUnavailable)
+		writeHandshakeError(w, http.StatusServiceUnavailable, rpc.CodeNoProvidersAvailable, "no providers available")
 		return
 	}
 
@@ -384,7 +404,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 			proxy.log.Error("client closed the connection", "error", err)
 		default:
 			proxy.log.Error("error dialing provider", "error", err)
-			http.Error(w, "error dialing provider: "+err.Error(), http.StatusInternalServerError)
+			writeHandshakeError(w, http.StatusInternalServerError, rpc.CodeInternalError, "error dialing provider: "+err.Error())
 		}
 
 		return

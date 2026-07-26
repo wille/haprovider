@@ -63,17 +63,38 @@ func (c *Chain) AllowMethod(method string) bool {
 
 func (c *Chain) HandleError(code int, message string) error {
 	switch code {
-	// Node is unhealthy / behind by slots
+	// Standard JSON-RPC "Method not found": the node doesn't implement/enable it.
+	case -32601:
+		return &rpc.MethodNotSupportedError{Code: code, Message: message}
+	// Node is unhealthy / behind by slots.
 	case -32005:
 		return &rpc.ErrorRateLimited{Message: message}
-	// Standard JSON-RPC internal error
+	// Standard JSON-RPC internal error.
 	case -32603:
 		return fmt.Errorf("internal error: %s", message)
+	// The node doesn't have the requested data (pruned / skipped / behind), but an
+	// archival or more in-sync provider may. Try the next provider without marking
+	// this one unhealthy or caching anything; if none can serve it, the error is
+	// returned to the client. Codes from Agave rpc-client-api custom_error.rs:
+	//   -32001 block cleaned up (pruned)
+	//   -32004 block not available for slot
+	//   -32007 slot skipped or missing (ledger jump to recent snapshot)
+	//   -32008 no snapshot
+	//   -32009 slot skipped or missing in long-term storage
+	//   -32011 transaction history not available from this node
+	//   -32014 block status not yet available
+	//   -32016 minimum context slot not reached (node behind)
+	case -32001, -32004, -32007, -32008, -32009, -32011, -32014, -32016:
+		return &rpc.ErrorTryNextProvider{Message: message}
 	}
 
-	// -32009 Slot was skipped or missing in long-term storage - check next provider
-	// -32014 Block status not yet available - check next provider
-
+	// Everything else is a client- or transaction-level error returned to the
+	// client unchanged: parse / invalid-request / invalid-params (-32700 / -32600 /
+	// -32602), tx preflight / signature / precompile / version failures (-32002 /
+	// -32003 / -32006 / -32015), secondary-index exclusion (-32010), signature
+	// length mismatch (-32013), and account-scan errors (-32012, e.g. an oversized
+	// getProgramAccounts scan — a client condition, so we must not mark the healthy
+	// provider unhealthy over it).
 	return nil
 }
 

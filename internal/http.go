@@ -19,10 +19,6 @@ import (
 	"github.com/wille/haprovider/internal/rpc"
 )
 
-// errCodeResourceUnavailable is the JSON-RPC error code ("Resource Unavailable")
-// returned when a chain does not allow a client to call a method.
-const errCodeResourceUnavailable = -32002
-
 // coalesceIDCounter assigns a unique id to each coalesced upstream call so its
 // "request" log line can be correlated to the group it served.
 var coalesceIDCounter atomic.Uint64
@@ -34,7 +30,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
-		http.Error(w, "invalid content type", http.StatusBadRequest)
+		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeInvalidRequest, "invalid content type")
 		return
 	}
 
@@ -44,25 +40,25 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			log.Error("http: request body too large", "limit", rpc.MaxRequestBodySize)
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "request too large")
 			return
 		}
 
 		log.Error("http: error reading body", "error", err)
-		http.Error(w, "error reading body", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error reading body")
 		return
 	}
 
 	req, err := rpc.DecodeBatchRequest(body)
 	if err != nil {
 		log.Error("http: bad request", "error", err, "body", rpc.FormatRawBody(string(body)))
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeParseError, "bad request")
 		return
 	}
 
 	if len(req.Requests) > rpc.MaxBatchSize {
 		log.Error("batch too large", "batch_size", len(req.Requests), "max", rpc.MaxBatchSize)
-		http.Error(w, "batch too large", http.StatusRequestEntityTooLarge)
+		writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "batch too large")
 		return
 	}
 
@@ -194,6 +190,11 @@ func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.
 	// exhaustion returns a 413 rather than "no providers available".
 	requestTooLarge := false
 
+	// The most recent response from a healthy provider that couldn't serve this
+	// request (e.g. Solana slot/block not available here). If no provider can
+	// serve it, we return this upstream error to the client rather than a 503.
+	var lastTryNext *forwardResult
+
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
@@ -284,14 +285,28 @@ NextProvider:
 			errorCode, errorMessage := sub.GetError()
 			reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
 
-			if rpc.IsMethodNotSupported(errorCode) {
-				provider.MarkMethodUnsupported(req.Requests[i].Method)
-				methodUnsupported = true
-				methodNotSupported = true
-				continue
-			}
-
 			if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
+				// The chain reports the method isn't supported (the standard -32601,
+				// or a provider variant like QuickNode's -32604/-32004): record it and
+				// skip-not-lose to another provider.
+				var mns *rpc.MethodNotSupportedError
+				if errors.As(herr, &mns) {
+					provider.MarkMethodUnsupported(req.Requests[i].Method)
+					methodUnsupported = true
+					methodNotSupported = true
+					continue
+				}
+
+				// The provider is healthy but can't serve this specific request;
+				// try another provider without marking it unhealthy or caching, and
+				// remember the response in case no provider can serve it.
+				var tryNext *rpc.ErrorTryNextProvider
+				if errors.As(herr, &tryNext) {
+					reqLog.Debug("provider cannot serve request, trying next", "error_code", errorCode, "method", req.Requests[i].Method)
+					lastTryNext = &forwardResult{res: res, provider: provider, dur: time.Since(start)}
+					continue NextProvider
+				}
+
 				provider.MarkUnhealthy(herr)
 				continue NextProvider
 			}
@@ -317,6 +332,13 @@ NextProvider:
 
 	if requestTooLarge {
 		return nil, errRequestTooLarge
+	}
+
+	// No provider could serve the request, but at least one is healthy and
+	// returned a real error (e.g. the block is unavailable everywhere): return
+	// that upstream error to the client rather than a generic 503.
+	if lastTryNext != nil {
+		return lastTryNext, nil
 	}
 
 	return nil, errNoProvidersAvailable
@@ -387,6 +409,18 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 	}
 }
 
+// writeRPCError writes a JSON-RPC error response (id null) with the given HTTP
+// status, so a client of an RPC endpoint always gets a structured error rather
+// than a plain-text body.
+func writeRPCError(w http.ResponseWriter, log *slog.Logger, status, code int, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	resp := &rpc.Response{Version: "2.0", ID: nil, Error: rpc.NewError(code, message)}
+	if err := rpc.WriteResponse(w, resp); err != nil {
+		log.Error("error writing body", "error", err)
+	}
+}
+
 // writeForwardError writes the appropriate client response for a failover error.
 func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 	// Client disconnected mid-flight: nothing left to write to.
@@ -396,11 +430,7 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 
 	if errors.Is(err, errNoProvidersAvailable) {
 		log.Error("no providers available")
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
-			log.Error("error writing body", "error", werr)
-		}
+		writeRPCError(w, log, http.StatusServiceUnavailable, rpc.CodeNoProvidersAvailable, "no providers available")
 		return
 	}
 
@@ -408,7 +438,7 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 	// problem, not the providers, so return a 413 (and none were marked unhealthy).
 	if errors.Is(err, errRequestTooLarge) {
 		log.Warn("request too large for all providers")
-		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "request too large")
 		return
 	}
 
@@ -418,17 +448,12 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 	var nom *noProviderForMethodError
 	if errors.As(err, &nom) {
 		log.Error("no provider available for method", "methods", nom.methods)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusNotImplemented)
-		resp := &rpc.Response{Version: "2.0", ID: nil, Error: rpc.NewError(rpc.CodeMethodNotFound, err.Error())}
-		if werr := rpc.WriteResponse(w, resp); werr != nil {
-			log.Error("error writing body", "error", werr)
-		}
+		writeRPCError(w, log, http.StatusNotImplemented, rpc.CodeMethodNotFound, err.Error())
 		return
 	}
 
 	log.Error("request failed", "error", err)
-	http.Error(w, "request failed", http.StatusInternalServerError)
+	writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "request failed")
 }
 
 // writeBatchResponse serializes res and writes it to the client, setting the
@@ -441,7 +466,7 @@ func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider
 	out, err := rpc.SerializeBatchResponse(res)
 	if err != nil {
 		log.Error("error serializing response", "error", err)
-		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error serializing response")
 		return
 	}
 
@@ -463,13 +488,13 @@ func writeMethodNotAllowed(w http.ResponseWriter, c chain.Chain, req *rpc.BatchR
 		if c.AllowMethod(sub.Method) {
 			msg = "request rejected: batch contains a method that is not allowed"
 		}
-		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(errCodeResourceUnavailable, msg)}
+		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(rpc.CodeResourceUnavailable, msg)}
 	}
 
 	out, err := rpc.SerializeBatchResponse(&rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch})
 	if err != nil {
 		log.Error("error serializing response", "error", err)
-		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error serializing response")
 		return
 	}
 

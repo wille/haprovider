@@ -13,6 +13,26 @@ import (
 )
 
 const (
+	// Method-not-supported codes. -32601 is the JSON-RPC standard "Method not
+	// found"; -32604 and -32004 are used by some providers (e.g. QuickNode, the
+	// latter on some EVM chains like Arbitrum) for a method the endpoint/plan
+	// doesn't support. -32612/-32613 are QuickNode's "custom traces not allowed"
+	// (debug/trace methods gated behind the plan).
+	codeMethodNotFound        = -32601
+	codeMethodNotSupported    = -32604
+	codeMethodNotSupportedEVM = -32004
+	codeTracesBlocked         = -32612
+	codeTracesNotAllowed      = -32613
+
+	// codeServerError (-32000) is Geth's catch-all "server error"; its meaning is
+	// in the message, not the code (see HandleError).
+	codeServerError = -32000
+
+	// Data-availability codes (EIP-1474): the node doesn't have the requested
+	// resource, but an archival or more in-sync provider may.
+	codeResourceNotFound    = -32001
+	codeResourceUnavailable = -32002
+
 	// codeRateLimited is the JSON-RPC error code returned when a provider is rate limiting us.
 	codeRateLimited = -32005
 
@@ -23,16 +43,58 @@ const (
 	codeNetworkError = -32011
 )
 
+// dataUnavailableHints are substrings that appear in a Geth -32000 message when
+// the node simply doesn't have the requested data yet: pruned state, a block it
+// hasn't synced, an archival miss, or transaction indexing still in progress.
+// -32000 is Geth's catch-all code (it also covers nonce/gas errors, reverts,
+// timeouts, filter-not-found), so the disposition must come from the message.
+var dataUnavailableHints = []string{
+	"missing trie node",
+	"header not found",
+	"block not found",
+	"historical state",
+	"state not available",
+	"state is not available",
+	"no state available",
+	"not synced",
+	"not in sync",
+	"indexing",
+}
+
+func isDataUnavailable(message string) bool {
+	m := strings.ToLower(message)
+	for _, hint := range dataUnavailableHints {
+		if strings.Contains(m, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 type Ethereum struct{}
 
 func (c *Ethereum) HandleError(code int, message string) error {
 	switch code {
+	case codeMethodNotFound, codeMethodNotSupported, codeMethodNotSupportedEVM, codeTracesBlocked, codeTracesNotAllowed:
+		return &rpc.MethodNotSupportedError{Code: code, Message: message}
 	case codeRateLimited:
 		return &rpc.ErrorRateLimited{Message: message}
 	case codeInternalError:
 		return fmt.Errorf("internal error: %s", message)
 	case codeNetworkError:
 		return fmt.Errorf("provider network error: %s", message)
+	case codeResourceNotFound, codeResourceUnavailable:
+		// The node doesn't have the requested resource (or timed out); an archival
+		// or more in-sync provider may. Try the next provider without marking this
+		// one unhealthy or caching anything.
+		return &rpc.ErrorTryNextProvider{Message: message}
+	case codeServerError:
+		// -32000 is Geth's catch-all: only the pruned/archive/not-synced messages
+		// mean another provider may serve it. Everything else (reverts, nonce/gas
+		// errors, timeouts, filter-not-found) is a client-level result returned as-is.
+		if isDataUnavailable(message) {
+			return &rpc.ErrorTryNextProvider{Message: message}
+		}
 	}
 
 	return nil

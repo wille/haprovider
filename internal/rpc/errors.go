@@ -24,24 +24,40 @@ func NewError(code int, message string) json.RawMessage {
 	return b
 }
 
+// JSON-RPC error codes that haprovider itself puts in responses it generates for
+// clients (as opposed to codes it receives from providers, which each chain
+// interprets in its own HandleError).
+const (
+	// CodeParseError ("Parse error") is returned when the client's request body is
+	// not valid JSON / JSON-RPC.
+	CodeParseError = -32700
+
+	// CodeInvalidRequest ("Invalid Request") is returned when the request is
+	// malformed or unacceptable (wrong content type, too large, batch too large).
+	CodeInvalidRequest = -32600
+
+	// CodeResourceUnavailable ("Resource Unavailable") is returned when a chain
+	// does not allow a client to call a method.
+	CodeResourceUnavailable = -32002
+
+	// CodeMethodNotFound is the JSON-RPC standard "Method not found", returned when
+	// no provider supports the requested method.
+	CodeMethodNotFound = -32601
+
+	// CodeInternalError ("Internal error") is returned for a failure inside the
+	// proxy itself (reading the body, serializing a response, an unclassified
+	// upstream failure).
+	CodeInternalError = -32603
+
+	// CodeNoProvidersAvailable is a haprovider-specific code (outside the standard
+	// ranges) returned when no provider can currently serve the request.
+	CodeNoProvidersAvailable = -39200
+)
+
 var ErrorResponseNoProvidersAvailable = Response{
 	Version: "2.0",
 	ID:      nil,
-	Error:   NewError(-39200, "no providers available"),
-}
-
-// Method-not-supported JSON-RPC error codes. CodeMethodNotFound is the JSON-RPC
-// 2.0 standard "Method not found"; CodeMethodNotSupported is used by some
-// providers (e.g. QuickNode) for "this request method is not supported".
-const (
-	CodeMethodNotFound     = -32601
-	CodeMethodNotSupported = -32604
-)
-
-// IsMethodNotSupported reports whether a JSON-RPC error code means the provider
-// does not support the requested method.
-func IsMethodNotSupported(code int) bool {
-	return code == CodeMethodNotFound || code == CodeMethodNotSupported
+	Error:   NewError(CodeNoProvidersAvailable, "no providers available"),
 }
 
 // MethodNotSupportedError signals that a provider reported (via a JSON-RPC error
@@ -68,4 +84,19 @@ var _ error = (*ErrorRateLimited)(nil)
 
 func (e ErrorRateLimited) Error() string {
 	return fmt.Sprintf("rate limited: %s", e.Message)
+}
+
+// ErrorTryNextProvider signals that a provider is healthy but cannot serve this
+// particular request (e.g. it doesn't have the requested Solana slot/block). The
+// failover loop tries the next provider without marking this one unhealthy and
+// without caching anything; if no provider can serve the request, the upstream
+// error is returned to the client.
+type ErrorTryNextProvider struct {
+	Message string
+}
+
+var _ error = (*ErrorTryNextProvider)(nil)
+
+func (e *ErrorTryNextProvider) Error() string {
+	return fmt.Sprintf("try next provider: %s", e.Message)
 }

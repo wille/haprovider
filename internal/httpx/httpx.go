@@ -208,10 +208,12 @@ func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRe
 		}
 
 		// A "not implemented" status with no usable body: surface it so a single
-		// request can skip the provider for this method without losing it.
+		// request can skip the provider for this method without losing it. The Code
+		// is cosmetic here (there was no JSON-RPC body); use the standard
+		// "Method not found" code.
 		var se *StatusError
 		if errors.As(err, &se) && se.Code == http.StatusNotImplemented {
-			return nil, &rpc.MethodNotSupportedError{Code: rpc.CodeMethodNotSupported, Message: err.Error()}
+			return nil, &rpc.MethodNotSupportedError{Code: rpc.CodeMethodNotFound, Message: err.Error()}
 		}
 
 		return nil, err
