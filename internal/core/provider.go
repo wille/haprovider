@@ -19,6 +19,11 @@ const DefaultRateLimitBackoff = 30 * time.Second
 const DefaultNodeVersionRetention = time.Hour
 const DefaultConnectionTimeout = 10 * time.Second
 
+// DefaultUnsupportedMethodTTL is how long a provider is skipped for a method it
+// reported it does not support before we re-probe it. It's a var (not a const)
+// so tests can lower it.
+var DefaultUnsupportedMethodTTL = 30 * time.Minute
+
 type Provider struct {
 
 	// Name of the provider
@@ -56,6 +61,11 @@ type Provider struct {
 	m sync.Mutex
 
 	versionsSeen map[string]time.Time
+
+	// unsupportedMethods records methods this provider has reported it does not
+	// support, keyed to the time the flag was set. Entries older than
+	// DefaultUnsupportedMethodTTL are re-probed. Guarded by m.
+	unsupportedMethods map[string]time.Time
 }
 
 // Logger returns a structured logger tagged with the endpoint and provider name.
@@ -137,6 +147,44 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 
 }
 
+// MarkMethodUnsupported records that this provider reported it does not support
+// method, so failover skips it for that method (until the TTL re-probes it).
+// Capability is independent of health, so this is not cleared by MarkHealthy.
+func (p *Provider) MarkMethodUnsupported(method string) {
+	if method == "" {
+		return
+	}
+
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	if p.unsupportedMethods == nil {
+		p.unsupportedMethods = make(map[string]time.Time)
+	}
+	if _, ok := p.unsupportedMethods[method]; !ok {
+		p.Logger().Info("method not supported by provider", "method", method)
+	}
+	p.unsupportedMethods[method] = time.Now()
+}
+
+// SupportsMethod reports whether this provider may be used for method. A method
+// previously flagged unsupported returns false until DefaultUnsupportedMethodTTL
+// elapses, after which the flag is cleared (lazy re-probe) and it returns true.
+func (p *Provider) SupportsMethod(method string) bool {
+	p.m.Lock()
+	defer p.m.Unlock()
+
+	t, ok := p.unsupportedMethods[method]
+	if !ok {
+		return true
+	}
+	if time.Since(t) > DefaultUnsupportedMethodTTL {
+		delete(p.unsupportedMethods, method)
+		return true
+	}
+	return false
+}
+
 // HandleTooManyRequests handles a 429 response and stops using the provider until it's ready again.
 func (p *Provider) HandleTooManyRequests(req *http.Response) error {
 	var retryAfter time.Duration
@@ -161,11 +209,13 @@ func (p *Provider) HandleTooManyRequests(req *http.Response) error {
 	p.RateLimitedUntil = time.Now().Add(retryAfter)
 	p.m.Unlock()
 
+	// Return a typed rate-limit error so callers (e.g. httpx.SendRPCBatchRequest)
+	// can tell a backoff apart from other upstream failures.
+	msg := "too many requests"
 	if receivedDuration {
-		return fmt.Errorf("rate limited for %s", retryAfter)
+		msg = fmt.Sprintf("retry after %s", retryAfter)
 	}
-
-	return fmt.Errorf("rate limited")
+	return &rpc.ErrorRateLimited{Message: msg, RetryAfter: retryAfter}
 }
 
 func (p *Provider) IsOnline() bool {

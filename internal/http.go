@@ -19,10 +19,6 @@ import (
 	"github.com/wille/haprovider/internal/rpc"
 )
 
-// errCodeResourceUnavailable is the JSON-RPC error code ("Resource Unavailable")
-// returned when a chain does not allow a client to call a method.
-const errCodeResourceUnavailable = -32002
-
 // coalesceIDCounter assigns a unique id to each coalesced upstream call so its
 // "request" log line can be correlated to the group it served.
 var coalesceIDCounter atomic.Uint64
@@ -34,7 +30,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
-		http.Error(w, "invalid content type", http.StatusBadRequest)
+		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeInvalidRequest, "invalid content type")
 		return
 	}
 
@@ -44,25 +40,25 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			log.Error("http: request body too large", "limit", rpc.MaxRequestBodySize)
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "request too large")
 			return
 		}
 
 		log.Error("http: error reading body", "error", err)
-		http.Error(w, "error reading body", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error reading body")
 		return
 	}
 
 	req, err := rpc.DecodeBatchRequest(body)
 	if err != nil {
 		log.Error("http: bad request", "error", err, "body", rpc.FormatRawBody(string(body)))
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeParseError, "bad request")
 		return
 	}
 
 	if len(req.Requests) > rpc.MaxBatchSize {
 		log.Error("batch too large", "batch_size", len(req.Requests), "max", rpc.MaxBatchSize)
-		http.Error(w, "batch too large", http.StatusRequestEntityTooLarge)
+		writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "batch too large")
 		return
 	}
 
@@ -125,15 +121,90 @@ type forwardResult struct {
 // is offline or has failed the request.
 var errNoProvidersAvailable = errors.New("no providers available")
 
+// errRequestTooLarge is returned when every provider rejected the request as too
+// large (HTTP 413). The request, not the provider, is the problem, so it maps to
+// a 413 for the client and never marks a provider unhealthy.
+var errRequestTooLarge = errors.New("request too large")
+
+// noProviderForMethodError is returned by forwardWithFailover when every provider
+// has reported it does not support one or more of the requested methods, so the
+// request cannot be served. The client receives a JSON-RPC "method not found"
+// error naming the offending method(s).
+type noProviderForMethodError struct {
+	methods []string
+}
+
+func (e *noProviderForMethodError) Error() string {
+	return "no provider available for method " + strings.Join(e.methods, ", ")
+}
+
+// supportsAllMethods reports whether provider currently supports every method in
+// req (none is on its unsupported list).
+func supportsAllMethods(provider *core.Provider, req *rpc.BatchRequest) bool {
+	for _, sub := range req.Requests {
+		if !provider.SupportsMethod(sub.Method) {
+			return false
+		}
+	}
+	return true
+}
+
+// methodsWithoutProvider returns the requested methods that no provider supports,
+// regardless of provider health. An empty result means the methods are supported
+// somewhere and any failure was an availability problem, not a capability one.
+func methodsWithoutProvider(endpoint *core.Endpoint, req *rpc.BatchRequest) []string {
+	var missing []string
+	seen := make(map[string]bool)
+	for _, sub := range req.Requests {
+		if seen[sub.Method] {
+			continue
+		}
+		seen[sub.Method] = true
+
+		supported := false
+		for _, provider := range endpoint.Providers {
+			if provider.SupportsMethod(sub.Method) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			missing = append(missing, sub.Method)
+		}
+	}
+	return missing
+}
+
 // forwardWithFailover runs the provider failover loop for req and returns the
 // first successful response and the provider that produced it. It records
 // per-request metrics and marks providers unhealthy on failure. It returns
 // ctx.Err() if the context is cancelled mid-flight, or errNoProvidersAvailable
 // when no provider could serve the request.
 func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
+	// Set when at least one provider skipped or rejected a requested method as
+	// unsupported, so exhaustion can report "no provider for method X" instead of
+	// the generic "no providers available".
+	methodUnsupported := false
+
+	// Set when a provider rejected the request as too large (HTTP 413), so
+	// exhaustion returns a 413 rather than "no providers available".
+	requestTooLarge := false
+
+	// The most recent response from a healthy provider that couldn't serve this
+	// request (e.g. Solana slot/block not available here). If no provider can
+	// serve it, we return this upstream error to the client rather than a 503.
+	var lastTryNext *forwardResult
+
 NextProvider:
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
+			continue
+		}
+
+		// Skip a provider we already know doesn't support a requested method;
+		// another provider may. If none do, we return a noProviderForMethodError.
+		if !supportsAllMethods(provider, req) {
+			methodUnsupported = true
 			continue
 		}
 
@@ -152,6 +223,30 @@ NextProvider:
 		}
 
 		if err != nil {
+			// The provider reported (even via a non-2xx status) that it doesn't
+			// support this method: record it and fail over WITHOUT marking the
+			// provider unhealthy. Only attributable for a single request; a batch
+			// transport error falls through to the generic failure below.
+			var mns *rpc.MethodNotSupportedError
+			if errors.As(err, &mns) && len(req.Requests) == 1 {
+				provider.MarkMethodUnsupported(req.Requests[0].Method)
+				methodUnsupported = true
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", req.Requests[0].Method)
+				continue NextProvider
+			}
+
+			// The provider rejected the request as too large (HTTP 413). That's a
+			// property of the request, not the provider's health; another provider
+			// may have a larger limit, so fail over WITHOUT marking it unhealthy. If
+			// none accept it, the loop returns errRequestTooLarge.
+			var se *httpx.StatusError
+			if errors.As(err, &se) && se.Code == http.StatusRequestEntityTooLarge {
+				log.Warn("provider rejected request as too large", "provider", provider.Name)
+				requestTooLarge = true
+				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
+				continue NextProvider
+			}
+
 			// In a high traffic environment, the provider might be taken offline by another concurrent request
 			if provider.IsOnline() {
 				provider.MarkUnhealthy(err)
@@ -178,16 +273,46 @@ NextProvider:
 			}
 		}
 
-		for _, sub := range res.Responses {
-			if sub.IsError() {
-				errorCode, errorMessage := sub.GetError()
-				reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+		// An in-band "method not supported" error means skip this provider for that
+		// method and fail over, without marking it unhealthy. Scan every sub-request
+		// first so all unsupported methods in a batch are recorded before moving on.
+		methodNotSupported := false
+		for i, sub := range res.Responses {
+			if !sub.IsError() {
+				continue
+			}
 
-				if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
-					provider.MarkUnhealthy(herr)
+			errorCode, errorMessage := sub.GetError()
+			reqLog.Debug("error response", "error_code", errorCode, "error_message", errorMessage)
+
+			if herr := chain.New(endpoint.Kind).HandleError(errorCode, errorMessage.Error()); herr != nil {
+				// The chain reports the method isn't supported (the standard -32601,
+				// or a provider variant like QuickNode's -32604/-32004): record it and
+				// skip-not-lose to another provider.
+				var mns *rpc.MethodNotSupportedError
+				if errors.As(herr, &mns) {
+					provider.MarkMethodUnsupported(req.Requests[i].Method)
+					methodUnsupported = true
+					methodNotSupported = true
+					continue
+				}
+
+				// The provider is healthy but can't serve this specific request;
+				// try another provider without marking it unhealthy or caching, and
+				// remember the response in case no provider can serve it.
+				var tryNext *rpc.ErrorTryNextProvider
+				if errors.As(herr, &tryNext) {
+					reqLog.Debug("provider cannot serve request, trying next", "error_code", errorCode, "method", req.Requests[i].Method)
+					lastTryNext = &forwardResult{res: res, provider: provider, dur: time.Since(start)}
 					continue NextProvider
 				}
+
+				provider.MarkUnhealthy(herr)
+				continue NextProvider
 			}
+		}
+		if methodNotSupported {
+			continue NextProvider
 		}
 
 		if req.IsBatch && len(res.Responses) != len(req.Requests) {
@@ -197,6 +322,23 @@ NextProvider:
 		}
 
 		return &forwardResult{res: res, provider: provider, dur: time.Since(start)}, nil
+	}
+
+	if methodUnsupported {
+		if missing := methodsWithoutProvider(endpoint, req); len(missing) > 0 {
+			return nil, &noProviderForMethodError{methods: missing}
+		}
+	}
+
+	if requestTooLarge {
+		return nil, errRequestTooLarge
+	}
+
+	// No provider could serve the request, but at least one is healthy and
+	// returned a real error (e.g. the block is unavailable everywhere): return
+	// that upstream error to the client rather than a generic 503.
+	if lastTryNext != nil {
+		return lastTryNext, nil
 	}
 
 	return nil, errNoProvidersAvailable
@@ -267,6 +409,18 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 	}
 }
 
+// writeRPCError writes a JSON-RPC error response (id null) with the given HTTP
+// status, so a client of an RPC endpoint always gets a structured error rather
+// than a plain-text body.
+func writeRPCError(w http.ResponseWriter, log *slog.Logger, status, code int, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	resp := &rpc.Response{Version: "2.0", ID: nil, Error: rpc.NewError(code, message)}
+	if err := rpc.WriteResponse(w, resp); err != nil {
+		log.Error("error writing body", "error", err)
+	}
+}
+
 // writeForwardError writes the appropriate client response for a failover error.
 func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 	// Client disconnected mid-flight: nothing left to write to.
@@ -276,16 +430,30 @@ func writeForwardError(w http.ResponseWriter, err error, log *slog.Logger) {
 
 	if errors.Is(err, errNoProvidersAvailable) {
 		log.Error("no providers available")
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		if werr := rpc.WriteResponse(w, &rpc.ErrorResponseNoProvidersAvailable); werr != nil {
-			log.Error("error writing body", "error", werr)
-		}
+		writeRPCError(w, log, http.StatusServiceUnavailable, rpc.CodeNoProvidersAvailable, "no providers available")
+		return
+	}
+
+	// Every provider rejected the request as too large: the request is the
+	// problem, not the providers, so return a 413 (and none were marked unhealthy).
+	if errors.Is(err, errRequestTooLarge) {
+		log.Warn("request too large for all providers")
+		writeRPCError(w, log, http.StatusRequestEntityTooLarge, rpc.CodeInvalidRequest, "request too large")
+		return
+	}
+
+	// No provider supports the requested method: 501 with a JSON-RPC "method not
+	// found" error naming it. The method is unavailable, not transiently down, so
+	// this is distinct from the 503 above.
+	var nom *noProviderForMethodError
+	if errors.As(err, &nom) {
+		log.Error("no provider available for method", "methods", nom.methods)
+		writeRPCError(w, log, http.StatusNotImplemented, rpc.CodeMethodNotFound, err.Error())
 		return
 	}
 
 	log.Error("request failed", "error", err)
-	http.Error(w, "request failed", http.StatusInternalServerError)
+	writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "request failed")
 }
 
 // writeBatchResponse serializes res and writes it to the client, setting the
@@ -298,7 +466,7 @@ func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider
 	out, err := rpc.SerializeBatchResponse(res)
 	if err != nil {
 		log.Error("error serializing response", "error", err)
-		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error serializing response")
 		return
 	}
 
@@ -320,13 +488,13 @@ func writeMethodNotAllowed(w http.ResponseWriter, c chain.Chain, req *rpc.BatchR
 		if c.AllowMethod(sub.Method) {
 			msg = "request rejected: batch contains a method that is not allowed"
 		}
-		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(errCodeResourceUnavailable, msg)}
+		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(rpc.CodeResourceUnavailable, msg)}
 	}
 
 	out, err := rpc.SerializeBatchResponse(&rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch})
 	if err != nil {
 		log.Error("error serializing response", "error", err)
-		http.Error(w, "error serializing response", http.StatusInternalServerError)
+		writeRPCError(w, log, http.StatusInternalServerError, rpc.CodeInternalError, "error serializing response")
 		return
 	}
 
