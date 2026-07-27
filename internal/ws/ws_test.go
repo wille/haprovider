@@ -454,3 +454,17 @@ func TestClient_MessageCounts(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond,
 		"received=%d sent=%d", client.MessagesReceived(), client.MessagesSent())
 }
+
+// TestTrackPending: only requests with an id are tracked. A request without an
+// id is a JSON-RPC notification that gets no response, so tracking pending[""]
+// would only create a stale entry that misattributes a later id:null response.
+func TestTrackPending(t *testing.T) {
+	pending := map[string]string{}
+
+	trackPending(pending, rpc.NewRequest("1", "eth_call", nil))
+	trackPending(pending, rpc.NewRequest("", "eth_subscribe", nil))
+
+	assert.Equal(t, "eth_call", pending["1"])
+	_, ok := pending[""]
+	assert.False(t, ok, "a request with no id must not be tracked")
+}

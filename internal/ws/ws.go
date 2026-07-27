@@ -174,6 +174,16 @@ func (proxy *WebSocketProxy) writeResponse(res *rpc.Response) {
 	proxy.ClientConn.Write(data)
 }
 
+// trackPending records an in-flight request's method keyed by its id so a later
+// error response (which carries no method) can be attributed to it. Requests
+// without an id are JSON-RPC notifications that get no response, so they are not
+// tracked — storing pending[""] would only produce a stale, misattributed entry.
+func trackPending(pending map[string]string, req *rpc.Request) {
+	if id := req.GetID(); id != "" {
+		pending[id] = req.Method
+	}
+}
+
 func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 	// pending maps an in-flight request id to its method, so a "method not
 	// supported" error response (which carries no method) can be attributed to the
@@ -188,14 +198,14 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			return
 		case req := <-proxy.Requests:
 			metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
-			pending[req.GetID()] = req.Method
+			trackPending(pending, req)
 			proxy.writeRequest(providerClient, req)
 
 			// Flush any remaining requests
 			for i := 0; i < len(proxy.Requests); i++ {
 				req := <-proxy.Requests
 				metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
-				pending[req.GetID()] = req.Method
+				trackPending(pending, req)
 				proxy.writeRequest(providerClient, req)
 			}
 
@@ -209,10 +219,15 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				return
 			}
 
-			// Attribute the response to its request's method (empty for
-			// notifications, which carry no id).
-			method := pending[rpcResponse.GetID()]
-			delete(pending, rpcResponse.GetID())
+			// Attribute the response to its request's method. Only match on a
+			// non-empty id: notifications and id:null error responses have no id, and
+			// looking up pending[""] would attach a stale method and evict unrelated
+			// bookkeeping.
+			var method string
+			if id := rpcResponse.GetID(); id != "" {
+				method = pending[id]
+				delete(pending, id)
+			}
 
 			if rpcResponse.IsError() {
 				metrics.RecordFailedRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", method)
