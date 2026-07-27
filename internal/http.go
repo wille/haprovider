@@ -260,7 +260,7 @@ NextProvider:
 
 		// The per-request "request" debug log is emitted by the caller (via
 		// logRequest) once the coalesce outcome is known, not here.
-		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).String())
+		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).Round(time.Millisecond).String())
 
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
 		elapsed := time.Since(start).Seconds()
@@ -348,7 +348,7 @@ NextProvider:
 // coalesceID means the request was served by a shared (coalesced) upstream call
 // and the id identifies that group.
 func logRequest(log *slog.Logger, req *rpc.BatchRequest, result *forwardResult, coalesceID uint64) {
-	l := log.With("provider", result.provider.Name, "request_time", result.dur.String())
+	l := log.With("provider", result.provider.Name, "request_time", result.dur.Round(time.Millisecond).String())
 	if coalesceID != 0 {
 		l = l.With("coalesced", coalesceID)
 	}

@@ -190,7 +190,7 @@ func main() {
 		})))
 	}
 
-	slog.Info("starting haprovider", "version", httpx.Version, "healthcheck_interval", parsedHealthcheckInterval.String())
+	slog.Info("starting haprovider", "version", httpx.Version, "healthcheck_interval", parsedHealthcheckInterval.Round(time.Millisecond).String())
 
 	var wg sync.WaitGroup
 

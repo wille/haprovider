@@ -56,7 +56,7 @@ func Run(ctx context.Context, p *core.Provider) error {
 func Worker(p *core.Provider, defaultHealthcheckInterval time.Duration) {
 	for {
 		if until := p.GetNextCheckTime(); !until.IsZero() && time.Now().Before(until) {
-			p.Logger().Debug("rate limited", "until", time.Until(until).String())
+			p.Logger().Debug("rate limited", "until", time.Until(until).Round(time.Millisecond).String())
 			time.Sleep(time.Until(until))
 		}
 
@@ -77,7 +77,7 @@ func runOnce(p *core.Provider, defaultHealthcheckInterval time.Duration) time.Du
 
 	if err == nil {
 		if p.IsOnline() {
-			p.Logger().Debug("healthcheck passed", "uptime", time.Since(p.GetLastStateChange()).String(), "next_check_in", defaultHealthcheckInterval.String(), "duration", duration.String())
+			p.Logger().Debug("healthcheck passed", "uptime", time.Since(p.GetLastStateChange()).Round(time.Millisecond).String(), "next_check_in", defaultHealthcheckInterval.Round(time.Millisecond).String(), "duration", duration.Round(time.Millisecond).String())
 		}
 
 		p.MarkHealthy(duration)
@@ -86,7 +86,7 @@ func runOnce(p *core.Provider, defaultHealthcheckInterval time.Duration) time.Du
 
 	nextRun := nextAttemptDelay(p.GetCurrentConnectionAttempts())
 	if !p.IsOnline() {
-		p.Logger().Debug("provider still failing", "downtime", time.Since(p.GetLastStateChange()).String(), "attempts", p.GetCurrentConnectionAttempts(), "next_check_in", nextRun.String(), "duration", duration.String(), "error", err)
+		p.Logger().Debug("provider still failing", "downtime", time.Since(p.GetLastStateChange()).Round(time.Millisecond).String(), "attempts", p.GetCurrentConnectionAttempts(), "next_check_in", nextRun.Round(time.Millisecond).String(), "duration", duration.Round(time.Millisecond).String(), "error", err)
 	}
 
 	p.MarkUnhealthy(err)

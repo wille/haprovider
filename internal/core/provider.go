@@ -143,7 +143,7 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 
 	// GetChainID takes the endpoint lock, not p.m, so calling it while we hold
 	// p.m is safe (lock order is always p.m -> Endpoint.mu, never the reverse).
-	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.GetChainID(), "block_height", p.highestBlock, "took", took.String())
+	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.GetChainID(), "block_height", p.highestBlock, "took", took.Round(time.Millisecond).String())
 
 }
 
@@ -213,7 +213,7 @@ func (p *Provider) HandleTooManyRequests(req *http.Response) error {
 	// can tell a backoff apart from other upstream failures.
 	msg := "too many requests"
 	if receivedDuration {
-		msg = fmt.Sprintf("retry after %s", retryAfter)
+		msg = fmt.Sprintf("retry after %s", retryAfter.Round(time.Millisecond))
 	}
 	return &rpc.ErrorRateLimited{Message: msg, RetryAfter: retryAfter}
 }
