@@ -8,6 +8,7 @@ import (
 
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/redact"
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -77,22 +78,31 @@ func LoadConfig(configFile string) *Config {
 		for _, provider := range endpoint.Providers {
 			provider.Endpoint = endpoint
 
+			var host string
 			if provider.Http == "" {
 				panic(fmt.Errorf("provider %s has no HTTP endpoint", provider.Name))
 			} else {
-				url, err := url.Parse(provider.Http)
+				u, err := url.Parse(provider.Http)
 
-				if err != nil || (url.Scheme != "http" && url.Scheme != "https") {
-					log.Fatalf("Invalid HTTP URL: %s", provider.Http)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+					log.Fatalf("Invalid HTTP URL: %s", redact.URL(provider.Http))
 				}
+				host = u.Host
 			}
 
 			if provider.Ws != "" {
-				url, err := url.Parse(provider.Ws)
+				u, err := url.Parse(provider.Ws)
 
-				if err != nil || (url.Scheme != "ws" && url.Scheme != "wss") {
-					log.Fatalf("Invalid Websocket URL: %s", provider.Ws)
+				if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") {
+					log.Fatalf("Invalid Websocket URL: %s", redact.URL(provider.Ws))
 				}
+			}
+
+			// Fall back to the URL host when no name is configured, so redacted
+			// logs (which no longer show the URL) still identify the provider. The
+			// host carries no API key.
+			if provider.Name == "" {
+				provider.Name = host
 			}
 
 			if provider.Headers != nil {

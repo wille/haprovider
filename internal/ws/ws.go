@@ -419,7 +419,9 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 			proxy.log.Error("client closed the connection", "error", err)
 		default:
 			proxy.log.Error("error dialing provider", "error", err)
-			writeHandshakeError(w, http.StatusInternalServerError, rpc.CodeInternalError, "error dialing provider: "+err.Error())
+			// redact.String strips any provider URL (with its API key) from the
+			// dial error before it goes back to the external client.
+			writeHandshakeError(w, http.StatusInternalServerError, rpc.CodeInternalError, "error dialing provider")
 		}
 
 		return

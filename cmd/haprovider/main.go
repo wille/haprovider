@@ -19,6 +19,7 @@ import (
 	"github.com/wille/haprovider/internal/healthcheck"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/metrics"
+	"github.com/wille/haprovider/internal/redact"
 	"github.com/wille/haprovider/internal/ws"
 	"golang.org/x/term"
 )
@@ -179,14 +180,18 @@ func main() {
 	if *logJSON {
 		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 			Level: level,
+			// Strip API keys from any URL that reaches a log line (including
+			// URL-bearing net/url errors).
+			ReplaceAttr: redact.Attr,
 		})))
 	} else {
 		// Human-friendly colored console output. Colors are disabled automatically
 		// when stdout isn't a terminal (e.g. piped to a file or log collector).
 		slog.SetDefault(slog.New(tint.NewHandler(os.Stdout, &tint.Options{
-			Level:      level,
-			TimeFormat: time.TimeOnly,
-			NoColor:    !term.IsTerminal(int(os.Stdout.Fd())),
+			Level:       level,
+			TimeFormat:  time.TimeOnly,
+			NoColor:     !term.IsTerminal(int(os.Stdout.Fd())),
+			ReplaceAttr: redact.Attr,
 		})))
 	}
 
