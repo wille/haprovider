@@ -172,6 +172,7 @@ endpoints:
 - `port`: HTTP/WS server port (default: 8080)
 - `metrics_port`: Prometheus port (default: none)
 - `healthcheck_interval`: How often each provider is health-checked (e.g. `10s`, `1m`) (default: 30s)
+- `real_ip_header`: Header carrying the real client IP when running behind a trusted proxy/load balancer, e.g. `Cf-Connecting-Ip` or `X-Forwarded-For` (optional; used for logging and the upstream X-Forwarded-For). Only enable behind a proxy you trust to set it, since clients can otherwise spoof it. ($HA_REAL_IP_HEADER)
 - `log_level`: Logging level (debug, info, warn, error)
 - `log_json`: Enable JSON logs
 - `keys`: Global inbound API keys accepted on every endpoint (optional). See [Authentication](#authentication).
@@ -238,6 +239,7 @@ Behavior:
 - `--metrics-port`: Prometheus port (default: none) ($HA_METRICS_PORT)
 - `--log-level`: Logging level (debug, info, warn, error) (default: info) ($HA_LOG_LEVEL)
 - `--log-json`: Enable JSON logging (default: false) ($HA_LOG_JSON)
+- `--real-ip-header`: Header carrying the real client IP when behind a trusted proxy, e.g. `Cf-Connecting-Ip` ($HA_REAL_IP_HEADER)
 
 > [!NOTE]
 > Command line arguments take precedence over configuration file settings. For example, if you specify `--log-level debug` on the command line, it will override the `log_level` setting in the config file.

@@ -58,19 +58,49 @@ type ctxKey int
 
 const forwardedForKey ctxKey = iota
 
-// ForwardedFor computes the X-Forwarded-For value to send upstream for a client
-// request: the client's host, appended to any X-Forwarded-For chain the client
-// already sent.
-func ForwardedFor(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+// RealIPHeader, when set, names the request header that carries the real client
+// IP (e.g. "Cf-Connecting-Ip" or "X-Forwarded-For") for deployments behind a
+// trusted proxy or load balancer, where the connection's remote address is the
+// proxy rather than the client. Empty (the default) means use the remote
+// address. Set once at startup and read-only thereafter.
+//
+// Only enable this behind a proxy you trust to set the header, since clients can
+// otherwise spoof it.
+var RealIPHeader string
+
+// ClientIP returns the real client IP for r: the value of RealIPHeader when it's
+// configured and present (the first entry when the header is a comma-separated
+// list, e.g. an X-Forwarded-For chain), otherwise the remote address with the
+// port stripped.
+func ClientIP(r *http.Request) string {
+	if RealIPHeader != "" {
+		if v := r.Header.Get(RealIPHeader); v != "" {
+			if i := strings.IndexByte(v, ','); i >= 0 {
+				v = v[:i]
+			}
+			return strings.TrimSpace(v)
+		}
 	}
 
-	if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
-		return prior + "," + host
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
 	return host
+}
+
+// ForwardedFor computes the X-Forwarded-For value to send upstream for a client
+// request: the real client IP (see ClientIP), appended to any X-Forwarded-For
+// chain the client already sent.
+func ForwardedFor(r *http.Request) string {
+	client := ClientIP(r)
+
+	// Preserve an existing forwarded chain, unless X-Forwarded-For is the very
+	// header we read the client IP from (which would duplicate it).
+	if prior := r.Header.Get("X-Forwarded-For"); prior != "" && !strings.EqualFold(RealIPHeader, "X-Forwarded-For") {
+		return prior + "," + client
+	}
+	return client
 }
 
 // WithForwardedFor stores the X-Forwarded-For value for r on the context so the

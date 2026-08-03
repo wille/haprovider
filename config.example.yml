@@ -18,6 +18,12 @@ port: :8080
 # How often each provider is health-checked (default 30s).
 #healthcheck_interval: 30s
 
+# When haprovider runs behind a trusted proxy / load balancer, read the real
+# client IP from this request header (used for logging and the upstream
+# X-Forwarded-For). Common values: Cf-Connecting-Ip (Cloudflare), X-Forwarded-For.
+# Only enable behind a proxy you trust to set it, since clients can spoof it.
+#real_ip_header: Cf-Connecting-Ip
+
 # log_level: info   # debug, info, warn, error
 # log_json: false
 

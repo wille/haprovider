@@ -104,6 +104,7 @@ func main() {
 	var logLevel = flag.String("log-level", DefaultLogLevel, "logging level (debug, info, warn, error) ($HA_LOG_LEVEL)")
 	var logJSON = flag.Bool("log-json", DefaultLogJSON, "enable JSON logging ($HA_LOG_JSON)")
 	var healthcheckInterval = flag.String("healthcheck-interval", DefaultHealthcheckInterval.String(), "healthcheck interval duration (e.g. 10s, 1m) ($HA_HEALTHCHECK_INTERVAL)")
+	var realIPHeader = flag.String("real-ip-header", "", "request header carrying the real client IP when behind a trusted proxy, e.g. Cf-Connecting-Ip ($HA_REAL_IP_HEADER)")
 
 	flag.Parse()
 
@@ -153,6 +154,16 @@ func main() {
 			*healthcheckInterval = config.HealthcheckInterval
 		}
 	}
+
+	if *realIPHeader == "" {
+		env := os.Getenv("HA_REAL_IP_HEADER")
+		if env != "" {
+			*realIPHeader = env
+		} else if config.RealIPHeader != "" {
+			*realIPHeader = config.RealIPHeader
+		}
+	}
+	httpx.RealIPHeader = *realIPHeader
 
 	parsedHealthcheckInterval, err := time.ParseDuration(*healthcheckInterval)
 	if err != nil {

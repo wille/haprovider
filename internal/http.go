@@ -26,7 +26,7 @@ var coalesceIDCounter atomic.Uint64
 func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	defer metrics.TrackInflight(endpoint.Name, "http")()
 
-	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http")
+	log := endpoint.Logger().With("ip", httpx.ClientIP(r), "transport", "http")
 
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		log.Error("http: close connection: invalid content type")
@@ -512,7 +512,7 @@ func writeMethodNotAllowed(w http.ResponseWriter, c chain.Chain, req *rpc.BatchR
 func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path string, w http.ResponseWriter, r *http.Request, timing *servertiming.Header) {
 	defer metrics.TrackInflight(endpoint.Name, "http")()
 
-	log := endpoint.Logger().With("ip", r.RemoteAddr, "transport", "http", "path", path)
+	log := endpoint.Logger().With("ip", httpx.ClientIP(r), "transport", "http", "path", path)
 
 	r.Body = http.MaxBytesReader(w, r.Body, rpc.MaxRequestBodySize)
 	body, err := io.ReadAll(r.Body)

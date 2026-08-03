@@ -396,7 +396,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	proxy := &WebSocketProxy{
-		log:       endpoint.Logger().With("ip", r.RemoteAddr, "transport", "ws"),
+		log:       endpoint.Logger().With("ip", httpx.ClientIP(r), "transport", "ws"),
 		ctx:       ctx,
 		cancel:    cancel,
 		endpoint:  endpoint,

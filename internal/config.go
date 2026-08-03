@@ -20,6 +20,11 @@ type Config struct {
 	MetricsPort         string                    `yaml:"metrics_port,omitempty"`
 	HealthcheckInterval string                    `yaml:"healthcheck_interval,omitempty"`
 
+	// RealIPHeader names the request header carrying the real client IP when
+	// haprovider runs behind a trusted proxy/load balancer (e.g. "Cf-Connecting-Ip"
+	// or "X-Forwarded-For"). Empty uses the connection's remote address.
+	RealIPHeader string `yaml:"real_ip_header,omitempty"`
+
 	// Keys are inbound bearer tokens accepted on every endpoint. Combined with
 	// each endpoint's own keys. Env references are expanded at load.
 	Keys []string `yaml:"keys,omitempty"`
