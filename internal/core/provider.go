@@ -106,6 +106,7 @@ func (p *Provider) MarkUnhealthy(err error) {
 	}
 
 	metrics.RecordProviderHealth(p.Endpoint.Name, p.Name, false)
+	metrics.SetProviderUptime(p.Endpoint.Name, p.Name, 0)
 
 	if !p.online {
 		p.attempt++
@@ -140,6 +141,8 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 	p.RateLimitedUntil = time.Time{}
 
 	metrics.RecordProviderHealth(p.Endpoint.Name, p.Name, true)
+	// Just came online; the healthcheck loop refreshes the growing value.
+	metrics.SetProviderUptime(p.Endpoint.Name, p.Name, 0)
 
 	// GetChainID takes the endpoint lock, not p.m, so calling it while we hold
 	// p.m is safe (lock order is always p.m -> Endpoint.mu, never the reverse).

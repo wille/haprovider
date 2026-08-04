@@ -289,6 +289,7 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_open_connections`: Currently open WebSocket connections
 - `haprovider_total_connections`: Total WebSocket connections established
 - `haprovider_provider_health`: Provider health status (1=healthy, 0=unhealthy)
+- `haprovider_provider_uptime_seconds`: How long the provider has been continuously online, in seconds (0 if offline)
 
 Enable metrics with configuration option `metrics_port: 127.0.0.1:9090`
 

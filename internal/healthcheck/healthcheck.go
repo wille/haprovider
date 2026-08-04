@@ -7,6 +7,7 @@ import (
 
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/metrics"
 )
 
 var defaultBlockLagTolerance = map[core.Kind]int{
@@ -77,7 +78,9 @@ func runOnce(p *core.Provider, defaultHealthcheckInterval time.Duration) time.Du
 
 	if err == nil {
 		if p.IsOnline() {
-			p.Logger().Debug("healthcheck passed", "uptime", time.Since(p.GetLastStateChange()).Round(time.Millisecond).String(), "next_check_in", defaultHealthcheckInterval.Round(time.Millisecond).String(), "duration", duration.Round(time.Millisecond).String())
+			uptime := time.Since(p.GetLastStateChange())
+			p.Logger().Debug("healthcheck passed", "uptime", uptime.Round(time.Millisecond).String(), "next_check_in", defaultHealthcheckInterval.Round(time.Millisecond).String(), "duration", duration.Round(time.Millisecond).String())
+			metrics.SetProviderUptime(p.Endpoint.Name, p.Name, uptime.Seconds())
 		}
 
 		p.MarkHealthy(duration)

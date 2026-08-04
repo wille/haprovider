@@ -51,6 +51,17 @@ var (
 		[]string{"endpoint", "provider"},
 	)
 
+	// Provider uptime in seconds — how long the provider has been continuously
+	// online, 0 while offline. The metric form of the "uptime" log field; it's
+	// refreshed each healthcheck cycle.
+	providerUptime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "haprovider_provider_uptime_seconds",
+			Help: "How long the provider has been continuously online, in seconds (0 if offline).",
+		},
+		[]string{"endpoint", "provider"},
+	)
+
 	// Request duration metrics
 	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -88,6 +99,7 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(openConnections)
 	prometheus.MustRegister(totalConnections)
 	prometheus.MustRegister(providerHealth)
+	prometheus.MustRegister(providerUptime)
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
 	prometheus.MustRegister(coalescedRequests)
@@ -136,4 +148,10 @@ func RecordProviderHealth(endpoint, provider string, online bool) {
 	} else {
 		providerHealth.WithLabelValues(endpoint, provider).Set(0)
 	}
+}
+
+// SetProviderUptime records how long the provider has been continuously online,
+// in seconds, or 0 when it's offline.
+func SetProviderUptime(endpoint, provider string, seconds float64) {
+	providerUptime.WithLabelValues(endpoint, provider).Set(seconds)
 }
