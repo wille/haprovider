@@ -37,12 +37,38 @@ var Version = "dev"
 // UserAgent is sent on all upstream requests.
 var UserAgent = fmt.Sprintf("haprovider/%s (+https://github.com/wille/haprovider)", Version)
 
+// client is shared by every upstream call (including health checks) so the
+// connection pool stays warm. It's tuned for a proxy: high concurrency against
+// a handful of upstream hosts, rather than the stdlib default of a few
+// connections each to many hosts.
 var client = &http.Client{
 	Transport: &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     5 * time.Minute,
+		Proxy: http.ProxyFromEnvironment,
+
+		// HTTP/2 is auto-negotiated only while Dial/DialContext/DialTLS and
+		// TLSClientConfig are all nil. Set this so adding any of them later
+		// doesn't silently drop us back to HTTP/1.1.
+		ForceAttemptHTTP2: true,
+
+		// Anything above MaxIdleConnsPerHost concurrent requests to a provider
+		// opens a connection that is closed instead of pooled once it's done,
+		// putting a TLS handshake on the hot path exactly when we're busiest.
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 100,
+
+		// Shorter than typical upstream keep-alive timeouts (nginx 75s, AWS ALB
+		// 60s) so we close idle connections before the upstream does. The
+		// transport transparently retries a pooled connection that died before
+		// we wrote anything, but once the request is on the wire a server-side
+		// close surfaces as an EOF it won't retry, since a POST is only
+		// replayable with an Idempotency-Key header. That EOF makes the failover
+		// loop mark an otherwise healthy provider unhealthy.
+		IdleConnTimeout: 60 * time.Second,
+
+		// The per-request context (Provider.GetTimeout()) already bounds the
+		// whole request. This just makes a stalled handshake fail as itself
+		// instead of silently eating the entire request budget.
+		TLSHandshakeTimeout: 5 * time.Second,
 	},
 }
 
