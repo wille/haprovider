@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/wille/haprovider/internal/chain"
 	"github.com/wille/haprovider/internal/core"
@@ -76,36 +78,41 @@ func LoadConfig(configFile string) *Config {
 			panic(fmt.Errorf("unknown chain kind: %s", endpoint.Kind))
 		}
 
-		if err := c.ValidateConfig(endpoint); err != nil {
-			panic(err)
-		}
-
-		for _, provider := range endpoint.Providers {
+		for i, provider := range endpoint.Providers {
 			provider.Endpoint = endpoint
+
+			// Identifies the provider in load errors. Name may still be empty here
+			// (it falls back to the URL host below), so use the list index instead.
+			id := fmt.Sprintf("%s/%s", endpoint.Name, provider.Name)
+			if provider.Name == "" {
+				id = fmt.Sprintf("%s/providers[%d]", endpoint.Name, i)
+			}
 
 			var host string
 			if provider.Http == "" {
-				panic(fmt.Errorf("provider %s has no HTTP endpoint", provider.Name))
+				panic(fmt.Errorf("provider %s has no HTTP endpoint", id))
 			} else {
+				provider.Http = expandURL(id, "http", provider.Http)
 				u, err := url.Parse(provider.Http)
 
 				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-					log.Fatalf("Invalid HTTP URL: %s", redact.URL(provider.Http))
+					log.Fatalf("Invalid HTTP URL for provider %s: %s", id, redact.URL(provider.Http))
 				}
 				host = u.Host
 			}
 
 			if provider.Ws != "" {
+				provider.Ws = expandURL(id, "ws", provider.Ws)
 				u, err := url.Parse(provider.Ws)
 
 				if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") {
-					log.Fatalf("Invalid Websocket URL: %s", redact.URL(provider.Ws))
+					log.Fatalf("Invalid Websocket URL for provider %s: %s", id, redact.URL(provider.Ws))
 				}
 			}
 
 			// Fall back to the URL host when no name is configured, so redacted
 			// logs (which no longer show the URL) still identify the provider. The
-			// host carries no API key.
+			// host carries no API key: keys live in the path, query or userinfo.
 			if provider.Name == "" {
 				provider.Name = host
 			}
@@ -116,7 +123,34 @@ func LoadConfig(configFile string) *Config {
 				}
 			}
 		}
+
+		// Validate after the provider URLs are expanded, so chain checks on the
+		// URL (e.g. tron's /jsonrpc suffix) see the real value.
+		if err := c.ValidateConfig(endpoint); err != nil {
+			panic(err)
+		}
 	}
 
 	return config
+}
+
+// expandURL expands ${VAR} (and $VAR) references in a provider URL. Unlike the
+// keys and headers, a reference to an unset or empty variable is an error: it
+// would otherwise yield a URL with its API key silently missing. The error
+// names the provider and the variable, never the URL or any expanded value.
+func expandURL(id, field, raw string) string {
+	var missing []string
+	expanded := os.Expand(raw, func(name string) string {
+		v := os.Getenv(name)
+		if v == "" && !slices.Contains(missing, name) {
+			missing = append(missing, name)
+		}
+		return v
+	})
+
+	if len(missing) > 0 {
+		panic(fmt.Errorf("provider %s: %s URL references unset or empty environment variable(s): %s", id, field, strings.Join(missing, ", ")))
+	}
+
+	return expanded
 }

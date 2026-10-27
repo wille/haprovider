@@ -8,6 +8,10 @@
 # nodes as additional providers — haprovider health-checks each one and fails over
 # between them automatically. Providers are tried in order, so list your preferred
 # (e.g. local) node first.
+#
+# Provider http/ws URLs expand ${ENV_VAR} references, so API keys can stay out of
+# this file, e.g. https://mainnet.infura.io/v3/${INFURA_KEY}. An unset or empty
+# variable in a URL is a startup error.
 
 # Address haprovider listens on for incoming JSON-RPC / WebSocket requests.
 port: :8080
@@ -145,8 +149,8 @@ endpoints:
 
 # Optional per-provider fields:
 #   - name: example
-#     http: https://example.com/rpc
-#     ws: wss://example.com/rpc
+#     http: https://example.com/rpc/${MY_API_KEY}   # ${ENV_VARS} are expanded
+#     ws: wss://example.com/rpc/${MY_API_KEY}
 #     timeout: 10s                 # request timeout (default 10s)
 #     headers:                     # extra headers; ${ENV_VARS} are expanded
 #       Authorization: "Bearer ${MY_API_KEY}"

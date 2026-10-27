@@ -158,14 +158,18 @@ endpoints:
         ws: ws://localhost:8146
         timeout: 10s
       - name: Infura
-        http: https://mainnet.infura.io/v3/<api-key>
-        ws: wss://mainnet.infura.io/ws/v3/<api-key>
+        http: https://mainnet.infura.io/v3/${INFURA_KEY}
+        ws: wss://mainnet.infura.io/ws/v3/${INFURA_KEY}
   solana:
     kind: solana
     providers:
       - name: quicknode
-        http: https://solana-mainnet.quicknode.pro/<api-key>
+        http: https://solana-mainnet.quicknode.pro/${QUICKNODE_TOKEN}
 ```
+
+Provider `http` and `ws` URLs, provider `headers` values, and `keys` expand `${ENV_VAR}`
+references, so API keys can live in the environment (e.g. a Kubernetes Secret) instead of
+the config file. See [Environment variables](#environment-variables).
 
 ### Configuration Options
 
@@ -185,10 +189,35 @@ endpoints:
   - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false). Note: `public` does **not** disable authentication — if keys apply to the endpoint, a valid token is still required.
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `providers`: List of provider configurations
-    - `name`: Provider identifier
-    - `http`: HTTP endpoint URL (required)
-    - `ws`: WebSocket endpoint URL (optional)
+    - `name`: Provider identifier (optional, defaults to the `http` URL's host)
+    - `http`: HTTP endpoint URL (required, expands `${ENV_VAR}`)
+    - `ws`: WebSocket endpoint URL (optional, expands `${ENV_VAR}`)
+    - `headers`: Extra headers sent to the provider (optional, values expand `${ENV_VAR}`)
     - `timeout`: Request timeout (optional, default 10s)
+
+### Environment variables
+
+`${ENV_VAR}` (or `$ENV_VAR`) references are expanded when the config is loaded, in:
+
+- provider `http` and `ws` URLs
+- provider `headers` values
+- global and per-endpoint `keys`
+
+```yml
+endpoints:
+  eth:
+    providers:
+      - name: quicknode
+        http: https://example.quiknode.pro/${QUICKNODE_TOKEN}/
+        ws: wss://example.quiknode.pro/${QUICKNODE_TOKEN}/
+```
+
+In provider URLs, a reference to an unset or empty variable stops haprovider at startup with
+an error naming the provider and the variable, rather than starting with a URL that is
+missing its key. A literal `$` in a URL must be percent-encoded as `%24`.
+
+URLs are logged as `scheme://host` only, and an unnamed provider is named after its host, so
+keep API keys in the URL's path, query or userinfo, never in the hostname.
 
 ### Authentication
 
@@ -225,7 +254,8 @@ Behavior:
 - **Multiple keys** are accepted, which lets you rotate keys with no downtime or hand out
   different keys to different services.
 - **Env expansion.** Key values are expanded with `os.ExpandEnv`, so you can keep secrets out
-  of the config file (`- ${HAPROVIDER_KEY}`).
+  of the config file (`- ${HAPROVIDER_KEY}`). Provider URLs expand too; see
+  [Environment variables](#environment-variables).
 - Requests with a missing or invalid token get `401 Unauthorized`. Authentication is enforced
   for HTTP JSON-RPC, the TRON HTTP API path, and WebSocket upgrades alike.
 - `public: true` does **not** bypass authentication — it only suppresses debug headers and
@@ -258,11 +288,11 @@ endpoints:
         http: http://localhost:8145
         ws: ws://localhost:8146
       - name: Infura
-        http: https://mainnet.infura.io/v3/<api-key>
-        ws: wss://mainnet.infura.io/ws/v3/<api-key>
+        http: https://mainnet.infura.io/v3/${INFURA_KEY}
+        ws: wss://mainnet.infura.io/ws/v3/${INFURA_KEY}
       - name: QuickNode
-        http: https://mainnet.quicknode.pro/<api-key>
-        ws: wss://mainnet.quicknode.pro/<api-key>
+        http: https://mainnet.quicknode.pro/${QUICKNODE_TOKEN}
+        ws: wss://mainnet.quicknode.pro/${QUICKNODE_TOKEN}
 ```
 
 ### Solana Configuration
@@ -273,7 +303,7 @@ endpoints:
     kind: solana
     providers:
       - name: quicknode
-        http: https://solana-mainnet.quicknode.pro/<api-key>
+        http: https://solana-mainnet.quicknode.pro/${QUICKNODE_TOKEN}
       - name: fallback
         http: https://solana.rpc.helius.network
 ```
