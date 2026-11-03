@@ -123,14 +123,18 @@ func TrackInflight(endpoint, transport string) func() {
 	}
 }
 
-// RecordRequest records metrics for a request
+// RecordRequest records metrics for a request. method is recorded as
+// OtherMethod unless it has been admitted with AdmitMethod.
 func RecordRequest(endpoint, provider, transport, method string, duration float64) {
+	method = methodLabel(method)
 	requestsTotal.WithLabelValues(endpoint, provider, transport, method).Inc()
 	requestDuration.WithLabelValues(endpoint, provider, transport, method).Observe(duration)
 }
 
+// RecordFailedRequest records a failed request. method is recorded as
+// OtherMethod unless it has been admitted with AdmitMethod.
 func RecordFailedRequest(endpoint, provider, transport, method string) {
-	failedRequestsTotal.WithLabelValues(endpoint, provider, transport, method).Inc()
+	failedRequestsTotal.WithLabelValues(endpoint, provider, transport, methodLabel(method)).Inc()
 }
 
 func RecordOpenConnection(endpoint, provider string) {

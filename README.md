@@ -321,6 +321,8 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_provider_health`: Provider health status (1=healthy, 0=unhealthy)
 - `haprovider_provider_uptime_seconds`: How long the provider has been continuously online, in seconds (0 if offline)
 
+The `method` label is the JSON-RPC method (or TRON API path) only once a provider has answered it successfully; until then, and for names no provider recognizes, it is `other`. This stops clients from creating unbounded time series by sending made-up method names.
+
 Enable metrics with configuration option `metrics_port: 127.0.0.1:9090`
 
 ## Contributing

@@ -229,6 +229,13 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				delete(pending, id)
 			}
 
+			// A provider answered it, so it's a real method: label it by name. The
+			// request itself was counted when sent, so a method's very first call is
+			// recorded as "other".
+			if !rpcResponse.IsError() {
+				metrics.AdmitMethod(method)
+			}
+
 			if rpcResponse.IsError() {
 				metrics.RecordFailedRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", method)
 

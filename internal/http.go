@@ -290,6 +290,8 @@ NextProvider:
 			if sub.IsError() {
 				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
 			} else {
+				// A provider answered it, so it's a real method: label it by name.
+				metrics.AdmitMethod(method)
 				metrics.RecordRequest(endpoint.Name, provider.Name, "http", method, elapsed)
 			}
 		}
@@ -627,6 +629,11 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 			continue
 		}
 
+		// A 2xx means the provider recognized the path: label it by name. Unknown
+		// paths (404s) stay "other", so clients can't mint arbitrary labels.
+		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			metrics.AdmitMethod(path)
+		}
 		metrics.RecordRequest(endpoint.Name, provider.Name, "http", path, time.Since(start).Seconds())
 
 		if !endpoint.Public {
