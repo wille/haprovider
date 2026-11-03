@@ -535,3 +535,128 @@ func TestBatchOutOfOrder_AttributedByID(t *testing.T) {
 	assert.False(t, a.SupportsMethod("eth_getLogs"), "the error answered id 2, eth_getLogs")
 	assert.True(t, a.SupportsMethod("eth_blockNumber"), "eth_blockNumber must not be blamed for eth_getLogs' error")
 }
+
+// tronAPIEndpoint builds a tron endpoint whose providers are the given handlers,
+// in order, all online.
+func tronAPIEndpoint(t *testing.T, handlers ...http.HandlerFunc) (*core.Endpoint, []*core.Provider) {
+	ep := &core.Endpoint{Name: "tron", ChainID: "mainnet", Kind: core.KindTron}
+	var providers []*core.Provider
+	for i, h := range handlers {
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+		p := &core.Provider{Name: string(rune('a' + i)), Http: srv.URL + "/jsonrpc", Endpoint: ep}
+		p.MarkHealthy(0)
+		providers = append(providers, p)
+	}
+	ep.Providers = providers
+	return ep, providers
+}
+
+// doAPI sends a request to the TRON HTTP API passthrough. target is the request
+// URI as a client would send it (escaped), e.g. "/tron/wallet/getnowblock".
+// It goes through a real ServeMux so the {path...} wildcard is decoded exactly
+// as in production.
+func doAPI(endpoint *core.Endpoint, method, target string) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{id}/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		IncomingHTTPAPIHandler(r.Context(), endpoint, r.PathValue("path"), w, r, &servertiming.Header{})
+	})
+	r := httptest.NewRequest(method, target, strings.NewReader(`{}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	return w
+}
+
+// TestHTTPAPI_EscapesPath: a decoded "?" in the path stays part of the path
+// upstream instead of injecting a query string.
+func TestHTTPAPI_EscapesPath(t *testing.T) {
+	got := make(chan *http.Request, 1)
+	endpoint, _ := tronAPIEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		got <- r
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	w := doAPI(endpoint, http.MethodPost, "/tron/wallet/getnowblock%3Fvisible=true")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	r := <-got
+	assert.Equal(t, "/wallet/getnowblock?visible=true", r.URL.Path, "the ? must stay in the path")
+	assert.Empty(t, r.URL.RawQuery, "no query may be injected")
+}
+
+// TestHTTPAPI_PreservesQuery: a real query string is still forwarded.
+func TestHTTPAPI_PreservesQuery(t *testing.T) {
+	got := make(chan *http.Request, 1)
+	endpoint, _ := tronAPIEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		got <- r
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	w := doAPI(endpoint, http.MethodGet, "/tron/wallet/getnowblock?visible=true")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	r := <-got
+	assert.Equal(t, "/wallet/getnowblock", r.URL.Path)
+	assert.Equal(t, "visible=true", r.URL.RawQuery)
+}
+
+// TestHTTPAPI_Restricted: only the wallet API prefixes and GET/POST are
+// forwarded; nothing else reaches a provider.
+func TestHTTPAPI_Restricted(t *testing.T) {
+	endpoint, _ := tronAPIEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("request must not reach the provider: %s %s", r.Method, r.URL.Path)
+	})
+
+	for _, tc := range []struct {
+		method, target string
+		status         int
+	}{
+		{http.MethodPost, "/tron/monitor/getstatsinfo", http.StatusNotFound},
+		{http.MethodPost, "/tron/wallet", http.StatusNotFound},
+		{http.MethodPost, "/tron/wallet/", http.StatusNotFound},
+		{http.MethodPost, "/tron/wallet/x%2F..%2F..%2Fmonitor%2Fgetstatsinfo", http.StatusNotFound},
+		{http.MethodDelete, "/tron/wallet/getnowblock", http.StatusMethodNotAllowed},
+	} {
+		w := doAPI(endpoint, tc.method, tc.target)
+		assert.Equal(t, tc.status, w.Code, "%s %s", tc.method, tc.target)
+	}
+}
+
+// TestHTTPAPI_ServerErrorFailsOver: a 5xx marks the provider unhealthy and
+// fails over; when every provider fails, the client gets the last upstream
+// error rather than a generic 503.
+func TestHTTPAPI_ServerErrorFailsOver(t *testing.T) {
+	broken := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"Error":"boom"}`, http.StatusInternalServerError)
+	}
+
+	endpoint, ps := tronAPIEndpoint(t, broken, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"blockID":"x"}`))
+	})
+	w := doAPI(endpoint, http.MethodPost, "/tron/wallet/getnowblock")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, ps[0].IsOnline(), "a returned 500 and should be marked unhealthy")
+
+	endpoint, _ = tronAPIEndpoint(t, broken, broken)
+	w = doAPI(endpoint, http.MethodPost, "/tron/wallet/getnowblock")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "boom")
+}
+
+// TestHTTPAPI_PaymentRequiredBacksOff: a 402 (quota exhausted) is a rate limit,
+// as on the JSON-RPC path: the provider backs off and the request fails over.
+func TestHTTPAPI_PaymentRequiredBacksOff(t *testing.T) {
+	endpoint, ps := tronAPIEndpoint(t,
+		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusPaymentRequired) },
+		func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) },
+	)
+
+	w := doAPI(endpoint, http.MethodPost, "/tron/wallet/getnowblock")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, ps[0].IsOnline())
+	assert.False(t, ps[0].GetNextCheckTime().IsZero(), "a should be backed off until its rate limit passes")
+}

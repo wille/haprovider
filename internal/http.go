@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -568,6 +569,20 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 
 	log := endpoint.Logger().With("ip", httpx.ClientIP(r), "transport", "http", "path", path)
 
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !allowedHTTPAPIPath(path) {
+		log.Warn("http api path not allowed")
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	// The path from the router is already unescaped: escape it again so a
+	// decoded "?" or "#" can't inject a query or fragment into the upstream URL.
+	upstreamPath := escapePath(path)
+
 	r.Body = http.MaxBytesReader(w, r.Body, rpc.MaxRequestBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -587,6 +602,12 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 		ctx = httpx.WithForwardedFor(ctx, r)
 	}
 
+	// The most recent 5xx from a provider, returned to the client if no provider
+	// can serve the request, so it sees the real upstream error rather than a
+	// generic 503.
+	var lastServerError *httpx.Response
+	var lastServerErrorProvider *core.Provider
+
 	for _, provider := range endpoint.Providers {
 		if !provider.IsOnline() {
 			continue
@@ -594,7 +615,7 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 
 		t := strings.TrimSuffix(provider.Http, "/jsonrpc")
 
-		target := t + "/" + path
+		target := t + "/" + upstreamPath
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
@@ -623,6 +644,18 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 			continue
 		}
 
+		// A 5xx means the provider is broken, not that the request is bad: mark it
+		// unhealthy and fail over, keeping the response in case none can serve it.
+		if res.StatusCode >= 500 {
+			if provider.IsOnline() {
+				provider.MarkUnhealthy(&httpx.StatusError{Code: res.StatusCode})
+			}
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", path)
+			log.Error("provider returned server error", "provider", provider.Name, "status", res.StatusCode)
+			lastServerError, lastServerErrorProvider = res, provider
+			continue
+		}
+
 		// A 2xx means the provider recognized the path: label it by name. Unknown
 		// paths (404s) stay "other", so clients can't mint arbitrary labels.
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
@@ -630,20 +663,64 @@ func IncomingHTTPAPIHandler(ctx context.Context, endpoint *core.Endpoint, path s
 		}
 		metrics.RecordRequest(endpoint.Name, provider.Name, "http", path, time.Since(start).Seconds())
 
-		if !endpoint.Public {
-			w.Header().Set("X-Provider", provider.Name)
-		}
-		if res.ContentType != "" {
-			w.Header().Set("Content-Type", res.ContentType)
-		}
-		w.WriteHeader(res.StatusCode)
-		if _, err := w.Write(res.Body); err != nil {
-			log.Error("error writing body", "error", err)
-		}
+		writeHTTPAPIResponse(w, endpoint, provider, res, log)
+		return
+	}
 
+	if lastServerError != nil {
+		writeHTTPAPIResponse(w, endpoint, lastServerErrorProvider, lastServerError, log)
 		return
 	}
 
 	log.Error("no providers available")
 	http.Error(w, "no providers available", http.StatusServiceUnavailable)
+}
+
+// writeHTTPAPIResponse writes an upstream HTTP API response to the client
+// verbatim, adding X-Provider unless the endpoint is public.
+func writeHTTPAPIResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider *core.Provider, res *httpx.Response, log *slog.Logger) {
+	if !endpoint.Public {
+		w.Header().Set("X-Provider", provider.Name)
+	}
+	if res.ContentType != "" {
+		w.Header().Set("Content-Type", res.ContentType)
+	}
+	w.WriteHeader(res.StatusCode)
+	if _, err := w.Write(res.Body); err != nil {
+		log.Error("error writing body", "error", err)
+	}
+}
+
+// httpAPIPrefixes are the TRON full-node HTTP API path prefixes we forward:
+// the full-node, solidity and PBFT wallet APIs. Anything else (node admin or
+// monitoring endpoints, arbitrary paths) is not proxied.
+var httpAPIPrefixes = []string{"wallet/", "walletsolidity/", "walletpbft/"}
+
+// allowedHTTPAPIPath reports whether path (unescaped, without a leading slash)
+// is a TRON HTTP API path we forward. Dot and empty segments are rejected so a
+// path like "wallet/..%2F..%2Fadmin" can't climb out of the allowed prefix once
+// the upstream resolves it.
+func allowedHTTPAPIPath(path string) bool {
+	for _, s := range strings.Split(path, "/") {
+		if s == "" || s == "." || s == ".." {
+			return false
+		}
+	}
+	for _, prefix := range httpAPIPrefixes {
+		if strings.HasPrefix(path, prefix) && len(path) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// escapePath escapes each segment of an unescaped slash-separated path, so it
+// can be appended to a URL without any character being read as a query,
+// fragment or other delimiter.
+func escapePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return strings.Join(segments, "/")
 }

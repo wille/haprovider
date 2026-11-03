@@ -181,7 +181,7 @@ the config file. See [Environment variables](#environment-variables).
 - `log_json`: Enable JSON logs
 - `keys`: Global inbound API keys accepted on every endpoint (optional). See [Authentication](#authentication).
 - `endpoints`: Map of endpoint configurations
-  - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API.
+  - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API. The native TRON HTTP API passthrough (`/<endpoint>/wallet/...`) only forwards `GET`/`POST` requests under `wallet/`, `walletsolidity/` and `walletpbft/`; other paths return 404.
   - `chainId`: Network chain ID (optional, EVM chains)
   - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)

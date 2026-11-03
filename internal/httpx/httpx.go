@@ -285,8 +285,9 @@ func SendRPCBatchRequest(ctx context.Context, p *core.Provider, req *rpc.BatchRe
 
 // ForwardHTTPRequest forwards a request to an explicit upstream URL, preserving the method
 // and body and reusing the provider's headers, timeout, User-Agent and
-// rate-limit handling. A 429 is returned as an error (so the caller can mark the
-// provider offline); all other upstream responses are returned verbatim.
+// rate-limit handling. A 429 or 402 is returned as a rate-limit error (so the
+// caller can back off the provider); all other upstream responses are returned
+// verbatim.
 func ForwardHTTPRequest(ctx context.Context, provider *core.Provider, method, rawURL string, body []byte, contentType string) (*Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, provider.GetTimeout())
 	defer cancel()
@@ -321,7 +322,8 @@ func ForwardHTTPRequest(ctx context.Context, provider *core.Provider, method, ra
 		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
+	// Rate limit / quota exhausted: back off, as on the JSON-RPC path.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired {
 		return nil, provider.HandleTooManyRequests(resp)
 	}
 
