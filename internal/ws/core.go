@@ -73,14 +73,13 @@ func (c *Client) Read() <-chan []byte {
 }
 
 func (c *Client) Write(data []byte) {
+	// Never block once the connection is closed: the writePump has exited and
+	// nothing will drain the queue.
 	select {
+	case c.send <- data:
 	case <-c.ctx.Done():
 		slog.Debug("write to closed channel", "ip", c.Conn.RemoteAddr())
-		return
-	default:
 	}
-
-	c.send <- data
 }
 
 // Close will gracefully close the connection with a close message. It is safe
@@ -114,8 +113,6 @@ func (c *Client) destroy(cause error) {
 }
 
 func (c *Client) readPump() {
-	defer func() { _ = c.Conn.Close() }()
-
 	_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error {
 		_ = c.Conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -130,11 +127,22 @@ func (c *Client) readPump() {
 
 		if err != nil {
 			c.destroy(err)
+			_ = c.Conn.Close()
 			return
 		}
 
 		c.recvCount.Add(1)
-		c.recv <- message
+
+		// The consumer may already have gone (the connection is being torn
+		// down); don't block forever holding the connection open. Return
+		// without closing the socket: the writePump closes it once it has
+		// written any pending close frame, and closing it here would race that
+		// write and drop the frame.
+		select {
+		case c.recv <- message:
+		case <-c.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -179,8 +187,9 @@ func (c *Client) writePump() {
 			}
 			c.sentCount.Add(1)
 
-			// Flush any pending queue of messages
-			for i := 0; i < len(c.send); i++ {
+			// Flush any pending queue of messages. Count first: len shrinks as we
+			// drain, so re-checking it each iteration stops halfway.
+			for n := len(c.send); n > 0; n-- {
 				err := c.Conn.WriteMessage(websocket.TextMessage, <-c.send)
 				if err != nil {
 					c.destroy(fmt.Errorf("write: %s", err))

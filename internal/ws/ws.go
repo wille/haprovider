@@ -41,6 +41,9 @@ const (
 
 var ErrNoProvidersAvailable = errors.New("no providers available")
 
+// errProxyClosed is the cancel cause once the connection handler has returned.
+var errProxyClosed = errors.New("proxy connection closed")
+
 type WebSocketProxy struct {
 	// The request context
 	ctx    context.Context
@@ -175,6 +178,36 @@ func (proxy *WebSocketProxy) writeResponse(res *rpc.Response) {
 	proxy.ClientConn.Write(data)
 }
 
+// sendResponse hands a provider response to the client pump. It gives up, and
+// returns false, once the proxy or the provider connection is closing, so the
+// provider pump can never block forever on a client pump that has gone.
+func (proxy *WebSocketProxy) sendResponse(providerClient *Client, res *rpc.Response) bool {
+	select {
+	case proxy.Responses <- res:
+		return true
+	case <-proxy.ctx.Done():
+		return false
+	case <-providerClient.ctx.Done():
+		return false
+	}
+}
+
+// sendRequest hands a client request to the provider pump. It gives up, and
+// returns false, once the proxy or either connection is closing, so the client
+// pump can never block forever on a provider pump that has gone.
+func (proxy *WebSocketProxy) sendRequest(client *Client, req *rpc.Request) bool {
+	select {
+	case proxy.Requests <- req:
+		return true
+	case <-proxy.ctx.Done():
+		return false
+	case <-client.ctx.Done():
+		return false
+	case <-proxy.ProviderConn.ctx.Done():
+		return false
+	}
+}
+
 // trackPending records an in-flight request's method keyed by its id so a later
 // error response (which carries no method) can be attributed to it. Requests
 // without an id are JSON-RPC notifications that get no response, so they are not
@@ -202,8 +235,8 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 			trackPending(pending, req)
 			proxy.writeRequest(providerClient, req)
 
-			// Flush any remaining requests
-			for i := 0; i < len(proxy.Requests); i++ {
+			// Flush any remaining requests. Count first: len shrinks as we drain.
+			for n := len(proxy.Requests); n > 0; n-- {
 				req := <-proxy.Requests
 				metrics.RecordRequest(proxy.endpoint.Name, proxy.provider.Name, "ws", req.Method, 0)
 				trackPending(pending, req)
@@ -259,7 +292,7 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 						proxy.log.Warn("provider cannot serve request", "method", method, "error_code", errorCode)
 					} else {
 						proxy.provider.MarkUnhealthy(err)
-						proxy.Responses <- rpcResponse
+						proxy.sendResponse(providerClient, rpcResponse)
 						proxy.Close(err)
 						proxy.ClientConn.Close(websocket.CloseServiceRestart, err)
 						proxy.ProviderConn.Close(websocket.CloseTryAgainLater, nil)
@@ -270,7 +303,9 @@ func (proxy *WebSocketProxy) pumpProvider(providerClient *Client) {
 				}
 			}
 
-			proxy.Responses <- rpcResponse
+			if !proxy.sendResponse(providerClient, rpcResponse) {
+				return
+			}
 		}
 	}
 }
@@ -329,7 +364,9 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			// Break up any batched requests into one request per message
 			for i, r := range req.Requests {
-				proxy.Requests <- r
+				if !proxy.sendRequest(client, r) {
+					return
+				}
 
 				if req.IsBatch {
 					requestLog.With("batch_index", i, "rpc_id", r.GetID(), "method", r.Method).Debug("request")
@@ -346,8 +383,8 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 
 			proxy.writeResponse(rpcResponse)
 
-			// Flush any remaining responses
-			for i := 0; i < len(proxy.Responses); i++ {
+			// Flush any remaining responses. Count first: len shrinks as we drain.
+			for n := len(proxy.Responses); n > 0; n-- {
 				proxy.writeResponse(<-proxy.Responses)
 			}
 		}
@@ -413,6 +450,9 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
+	// However the handler exits, cancel the proxy context so both pumps, which
+	// select on it, stop.
+	defer cancel(errProxyClosed)
 
 	proxy := &WebSocketProxy{
 		log:       endpoint.Logger().With("ip", httpx.ClientIP(r), "transport", "ws"),
