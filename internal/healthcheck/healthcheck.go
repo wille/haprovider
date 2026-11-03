@@ -38,18 +38,26 @@ func Run(ctx context.Context, p *core.Provider) error {
 
 	blockLagTolerance := defaultBlockLagTolerance[p.Endpoint.Kind]
 	if p.Endpoint.BlockLagTolerance != nil {
-		blockLagTolerance = *p.Endpoint.BlockLagTolerance
+		blockLagTolerance = max(*p.Endpoint.BlockLagTolerance, 0)
 	}
 
-	highestBlock := p.HighestBlock()
-
-	if nodeInfo.BlockHeight > highestBlock {
+	if nodeInfo.BlockHeight > p.HighestBlock() {
 		p.SetHighestBlock(nodeInfo.BlockHeight)
 	}
 
-	if highestBlock > 0 && nodeInfo.BlockHeight < highestBlock-uint64(blockLagTolerance) {
-		return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d missing=%d", nodeInfo.BlockHeight, highestBlock, highestBlock-nodeInfo.BlockHeight)
+	// Compare against the endpoint's tip, the highest block any of its
+	// providers has reported, so a node that has stalled (stopped advancing
+	// without reporting that it's syncing) is caught once the others move on.
+	// Written as height+tolerance < tip so it can't wrap around when the tip is
+	// below the tolerance.
+	tip := p.Endpoint.HighestBlock()
+	if nodeInfo.BlockHeight+uint64(blockLagTolerance) < tip {
+		return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d missing=%d", nodeInfo.BlockHeight, tip, tip-nodeInfo.BlockHeight)
 	}
+
+	// Only a provider that passed every check may raise the tip, so one that
+	// is failing for some other reason can't push the others out of rotation.
+	p.Endpoint.ObserveBlock(nodeInfo.BlockHeight)
 
 	return nil
 }

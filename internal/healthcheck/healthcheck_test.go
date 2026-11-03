@@ -43,11 +43,80 @@ func TestRun_BlockLag(t *testing.T) {
 	p := ethProvider(t, healthyEthMethods()) // reports block 256
 	tol := 10
 	p.Endpoint.BlockLagTolerance = &tol
-	p.SetHighestBlock(1000) // the network is far ahead of this node
+	p.Endpoint.ObserveBlock(1000) // another provider has seen the network far ahead
 
 	err := Run(context.Background(), p)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "node is behind")
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "node is behind")
+	}
+}
+
+// TestRun_BlockLagAcrossProviders: a node that has stalled is caught by
+// comparing it with the other providers of its endpoint. Comparing a provider
+// only with its own history, as before, never flagged it: its height was
+// always its own highest.
+func TestRun_BlockLagAcrossProviders(t *testing.T) {
+	ahead := rpctest.NewServer(map[string]any{
+		"web3_clientVersion": "geth/test",
+		"eth_chainId":        "0x1",
+		"eth_blockNumber":    "0x1000", // 4096
+		"eth_syncing":        false,
+	}, nil)
+	stalled := rpctest.NewServer(healthyEthMethods(), nil) // stuck at 256
+	t.Cleanup(ahead.Close)
+	t.Cleanup(stalled.Close)
+
+	ep := &core.Endpoint{Name: "test", Kind: core.KindEth}
+	a := &core.Provider{Name: "ahead", Http: ahead.URL, Endpoint: ep}
+	s := &core.Provider{Name: "stalled", Http: stalled.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{a, s}
+
+	assert.NoError(t, Run(context.Background(), a))
+	assert.Equal(t, uint64(4096), ep.HighestBlock())
+
+	err := Run(context.Background(), s)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "node is behind")
+	}
+	assert.Equal(t, uint64(4096), ep.HighestBlock(), "a lagging provider never lowers the tip")
+}
+
+// TestRun_BlockLagWithinTolerance: a provider trailing the tip by no more than
+// the tolerance is healthy.
+func TestRun_BlockLagWithinTolerance(t *testing.T) {
+	p := ethProvider(t, healthyEthMethods()) // reports block 256
+	tol := 10
+	p.Endpoint.BlockLagTolerance = &tol
+	p.Endpoint.ObserveBlock(266)
+
+	assert.NoError(t, Run(context.Background(), p))
+}
+
+// TestRun_BlockLagLowHeights: with the tip below the tolerance (e.g. a fresh
+// devnet), the lag check must not wrap around and fail every provider.
+func TestRun_BlockLagLowHeights(t *testing.T) {
+	methods := healthyEthMethods()
+	methods["eth_blockNumber"] = "0x14" // 20
+	p := ethProvider(t, methods)
+	// Both below the default eth tolerance of 50. (The old check subtracted the
+	// tolerance from the provider's own highest block and wrapped around.)
+	p.Endpoint.ObserveBlock(30)
+	p.SetHighestBlock(30)
+
+	assert.NoError(t, Run(context.Background(), p))
+}
+
+// TestRun_FailingProviderDoesNotRaiseTip: a provider that fails its
+// healthcheck for another reason (here, a chain ID mismatch) doesn't move the
+// endpoint's tip, so it can't push healthy providers out of rotation.
+func TestRun_FailingProviderDoesNotRaiseTip(t *testing.T) {
+	methods := healthyEthMethods()
+	methods["eth_blockNumber"] = "0xffffff"
+	p := ethProvider(t, methods)
+	p.Endpoint.ChainID = "5" // the node reports chain 1
+
+	assert.Error(t, Run(context.Background(), p))
+	assert.Equal(t, uint64(0), p.Endpoint.HighestBlock())
 }
 
 func TestRun_HighestBlockTracking(t *testing.T) {

@@ -62,9 +62,14 @@ type Endpoint struct {
 	// Unset uses DefaultMaxResponseSize; 0 means unlimited.
 	MaxResponseSize *int64 `yaml:"max_response_size,omitempty"`
 
-	// mu guards ChainID, which is set/validated concurrently by per-provider
-	// healthcheck goroutines sharing this endpoint.
+	// mu guards ChainID and highestBlock, which are set/validated concurrently
+	// by per-provider healthcheck goroutines sharing this endpoint.
 	mu sync.Mutex
+
+	// highestBlock is the chain tip: the highest block height reported by any
+	// of this endpoint's providers in a passing healthcheck. Providers are
+	// checked against it for block lag. Guarded by mu.
+	highestBlock uint64
 
 	// Coalescer deduplicates identical concurrent upstream requests on the HTTP
 	// path. The zero value is ready to use; keys are scoped to this endpoint.
@@ -97,6 +102,24 @@ func (e *Endpoint) GetChainID() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.ChainID
+}
+
+// HighestBlock returns the highest block height any provider of this endpoint
+// has reported in a passing healthcheck, or 0 if none has yet.
+func (e *Endpoint) HighestBlock() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.highestBlock
+}
+
+// ObserveBlock records a block height reported by a provider that passed its
+// healthcheck, raising the endpoint's highest block if it's higher.
+func (e *Endpoint) ObserveBlock(height uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if height > e.highestBlock {
+		e.highestBlock = height
+	}
 }
 
 // Logger returns a structured logger tagged with the endpoint name.

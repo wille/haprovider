@@ -183,7 +183,7 @@ the config file. See [Environment variables](#environment-variables).
 - `endpoints`: Map of endpoint configurations
   - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API. The native TRON HTTP API passthrough (`/<endpoint>/wallet/...`) only forwards `GET`/`POST` requests under `wallet/`, `walletsolidity/` and `walletpbft/`; other paths return 404.
   - `chainId`: Network chain ID (optional, EVM chains)
-  - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip before it's considered unhealthy (optional, per-chain default)
+  - `block_lag_tolerance`: How many blocks a provider may trail the highest seen tip (the highest block any of the endpoint's healthy providers has reported) before it's considered unhealthy (optional, per-chain default)
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)
   - `keys`: Inbound API keys accepted for this endpoint, in addition to any global `keys` (optional). See [Authentication](#authentication).
   - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false). Note: `public` does **not** disable authentication — if keys apply to the endpoint, a valid token is still required.
