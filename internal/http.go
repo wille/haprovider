@@ -50,6 +50,11 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 	}
 
 	req, err := rpc.DecodeBatchRequest(body)
+	if errors.Is(err, rpc.ErrEmptyBatch) {
+		log.Warn("http: empty batch request")
+		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeInvalidRequest, "empty batch")
+		return
+	}
 	if err != nil {
 		log.Error("http: bad request", "error", err, "body", rpc.FormatRawBody(string(body)))
 		writeRPCError(w, log, http.StatusBadRequest, rpc.CodeParseError, "bad request")

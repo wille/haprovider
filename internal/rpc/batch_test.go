@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -87,5 +88,15 @@ func TestBatchResponse(t *testing.T) {
 	}
 	if b[0] != '[' {
 		t.Fatalf("expected batch response to be serialized as an array")
+	}
+}
+
+// TestEmptyBatchRequest: "[]" is an Invalid Request per JSON-RPC 2.0 and is
+// rejected at decode time, so it can never reach a provider.
+func TestEmptyBatchRequest(t *testing.T) {
+	for _, body := range []string{`[]`, ` [ ] `} {
+		if _, err := DecodeBatchRequest([]byte(body)); !errors.Is(err, ErrEmptyBatch) {
+			t.Errorf("body %q: got error %v, want ErrEmptyBatch", body, err)
+		}
 	}
 }

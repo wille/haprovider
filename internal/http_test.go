@@ -447,3 +447,18 @@ func TestIncomingHttpRpcHandler_NoForwardedFor(t *testing.T) {
 
 	assert.Empty(t, *gotXFF)
 }
+
+// TestEmptyBatch_NotUnhealthy: an empty batch is rejected as an Invalid Request
+// without contacting any provider. It used to fail to serialize upstream, which
+// the failover loop blamed on each provider in turn, so one "[]" request took
+// every provider offline.
+func TestEmptyBatch_NotUnhealthy(t *testing.T) {
+	endpoint, a, b := twoProviderEndpoint(t, map[string]any{"eth_blockNumber": "0x10"}, map[string]any{"eth_blockNumber": "0x10"})
+
+	w := doRPC(endpoint, `[]`)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assertRPCError(t, w, rpc.CodeInvalidRequest)
+	assert.True(t, a.IsOnline(), "provider a must stay online")
+	assert.True(t, b.IsOnline(), "provider b must stay online")
+}

@@ -2,8 +2,12 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// ErrEmptyBatch is returned when decoding an empty batch request ("[]").
+var ErrEmptyBatch = errors.New("empty batch")
 
 // MaxBatchSize is the maximum number of requests allowed in a single batch.
 const MaxBatchSize = 100
@@ -100,6 +104,11 @@ func (r *BatchRequest) UnmarshalJSON(b []byte) error {
 		err := json.Unmarshal(b, &req)
 		if err != nil {
 			return err
+		}
+		// An empty batch can't be forwarded (it fails to serialize upstream) and
+		// JSON-RPC 2.0 defines it as an Invalid Request.
+		if len(req) == 0 {
+			return ErrEmptyBatch
 		}
 		r.Requests = req
 		r.IsBatch = true
