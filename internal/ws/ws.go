@@ -54,6 +54,10 @@ type WebSocketProxy struct {
 	endpoint *core.Endpoint
 	provider *core.Provider
 
+	// chain is the endpoint's chain implementation, used to enforce its method
+	// allowlist on client requests.
+	chain chain.Chain
+
 	// opened is the timestamp the client websocket connection was established.
 	opened time.Time
 
@@ -308,6 +312,17 @@ func (proxy *WebSocketProxy) pumpClient(client *Client) {
 			// Reset the bad request counter
 			proxy.badRequests = 0
 
+			// Enforce the chain's method allowlist (e.g. Bitcoin wallet/control
+			// commands), exactly as the HTTP path does. A batch containing any
+			// disallowed method is rejected in full, without reaching the provider.
+			if rejected := chain.RejectDisallowed(proxy.chain, req); rejected != nil {
+				for i, res := range rejected {
+					proxy.log.Warn("method not allowed", "rpc_id", req.Requests[i].GetID(), "method", req.Requests[i].Method)
+					proxy.writeResponse(res)
+				}
+				continue
+			}
+
 			requestLog := proxy.log
 
 			if req.IsBatch {
@@ -407,6 +422,7 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 		ctx:       ctx,
 		cancel:    cancel,
 		endpoint:  endpoint,
+		chain:     chain.New(endpoint.Kind),
 		Responses: make(chan *rpc.Response, 32),
 		Requests:  make(chan *rpc.Request, 32),
 	}

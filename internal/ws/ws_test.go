@@ -468,3 +468,37 @@ func TestTrackPending(t *testing.T) {
 	_, ok := pending[""]
 	assert.False(t, ok, "a request with no id must not be tracked")
 }
+
+// TestIncomingWebsocketHandler_BTCMethodFilter: the Bitcoin method allowlist is
+// enforced on WebSocket too, not just HTTP. A disallowed method is rejected by
+// the proxy (the upstream mock would answer -32601), a batch containing one is
+// rejected in full, and allowed methods still reach the provider.
+func TestIncomingWebsocketHandler_BTCMethodFilter(t *testing.T) {
+	p := wsProvider(t, "p", map[string]any{"getblockcount": 100, "getbalance": 1}, http.StatusSwitchingProtocols)
+	ep := &core.Endpoint{Name: "btc", ChainID: "mainnet", Kind: core.KindBTC, Providers: []*core.Provider{p}}
+	p.Endpoint = ep
+	p.MarkHealthy(0)
+
+	c, _ := dial(t, proxyURL(t, ep))
+
+	sendRPC(t, c, "1", "getbalance")
+	res := readRPC(t, c)
+	assert.Equal(t, "1", res.GetID())
+	code, err := res.GetError()
+	assert.Equal(t, rpc.CodeResourceUnavailable, code)
+	assert.ErrorContains(t, err, "method not allowed: getbalance")
+
+	batch := `[{"jsonrpc":"2.0","id":"2","method":"getblockcount","params":[]},` +
+		`{"jsonrpc":"2.0","id":"3","method":"getbalance","params":[]}]`
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, []byte(batch)))
+	for i := 0; i < 2; i++ {
+		res := readRPC(t, c)
+		code, _ := res.GetError()
+		assert.Equal(t, rpc.CodeResourceUnavailable, code, "id %s: the whole batch is rejected", res.GetID())
+	}
+
+	sendRPC(t, c, "4", "getblockcount")
+	res = readRPC(t, c)
+	assert.Equal(t, "4", res.GetID())
+	assert.False(t, res.IsError(), "allowed method must reach the provider")
+}

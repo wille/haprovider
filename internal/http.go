@@ -87,14 +87,10 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 	// Reject requests to methods the chain doesn't allow clients to call (e.g.
 	// Bitcoin wallet/mining/control commands). A request containing any disallowed
 	// method is rejected in full.
-	if c != nil {
-		for _, sub := range req.Requests {
-			if !c.AllowMethod(sub.Method) {
-				log.Warn("method not allowed", "method", sub.Method)
-				writeMethodNotAllowed(w, c, req, log)
-				return
-			}
-		}
+	if rejected := chain.RejectDisallowed(c, req); rejected != nil {
+		log.Warn("method not allowed", "methods", requestMethods(req))
+		writeMethodNotAllowed(w, req, rejected, log)
+		return
 	}
 
 	if !req.IsBatch && len(req.Requests) == 1 && c != nil && c.Coalesceable(req.Requests[0].Method) {
@@ -537,20 +533,18 @@ func writeBatchResponse(w http.ResponseWriter, endpoint *core.Endpoint, provider
 	}
 }
 
-// writeMethodNotAllowed rejects a request that contains a method the chain does
-// not allow, without contacting any provider. Each sub-request gets a JSON-RPC
-// error: the offending method(s) report "method not allowed", and any other
-// members of the same batch report that the batch was rejected.
-func writeMethodNotAllowed(w http.ResponseWriter, c chain.Chain, req *rpc.BatchRequest, log *slog.Logger) {
-	responses := make([]*rpc.Response, len(req.Requests))
+// requestMethods lists the methods in req, for logging.
+func requestMethods(req *rpc.BatchRequest) []string {
+	methods := make([]string, len(req.Requests))
 	for i, sub := range req.Requests {
-		msg := "method not allowed: " + sub.Method
-		if c.AllowMethod(sub.Method) {
-			msg = "request rejected: batch contains a method that is not allowed"
-		}
-		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(rpc.CodeResourceUnavailable, msg)}
+		methods[i] = sub.Method
 	}
+	return methods
+}
 
+// writeMethodNotAllowed writes the rejection responses built by
+// chain.RejectDisallowed, without contacting any provider.
+func writeMethodNotAllowed(w http.ResponseWriter, req *rpc.BatchRequest, responses []*rpc.Response, log *slog.Logger) {
 	out, err := rpc.SerializeBatchResponse(&rpc.BatchResponse{Responses: responses, IsBatch: req.IsBatch})
 	if err != nil {
 		log.Error("error serializing response", "error", err)

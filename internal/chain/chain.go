@@ -8,6 +8,7 @@ import (
 	"github.com/wille/haprovider/internal/chain/solana"
 	"github.com/wille/haprovider/internal/chain/tron"
 	"github.com/wille/haprovider/internal/core"
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 type ErrorAction int
@@ -70,4 +71,37 @@ func New(kind core.Kind) Chain {
 	default:
 		return nil
 	}
+}
+
+// RejectDisallowed checks req against c's method allowlist. If every method is
+// allowed it returns nil. Otherwise the whole request is rejected and it
+// returns one JSON-RPC error response per sub-request, in order: the offending
+// method(s) report "method not allowed", and any other members of the same
+// batch report that the batch was rejected. Used by both the HTTP and the
+// WebSocket path so the allowlist is enforced the same way on each.
+func RejectDisallowed(c Chain, req *rpc.BatchRequest) []*rpc.Response {
+	if c == nil {
+		return nil
+	}
+
+	allowed := true
+	for _, sub := range req.Requests {
+		if !c.AllowMethod(sub.Method) {
+			allowed = false
+			break
+		}
+	}
+	if allowed {
+		return nil
+	}
+
+	responses := make([]*rpc.Response, len(req.Requests))
+	for i, sub := range req.Requests {
+		msg := "method not allowed: " + sub.Method
+		if c.AllowMethod(sub.Method) {
+			msg = "request rejected: batch contains a method that is not allowed"
+		}
+		responses[i] = &rpc.Response{Version: "2.0", ID: sub.ID, Error: rpc.NewError(rpc.CodeResourceUnavailable, msg)}
+	}
+	return responses
 }
