@@ -462,3 +462,76 @@ func TestEmptyBatch_NotUnhealthy(t *testing.T) {
 	assert.True(t, a.IsOnline(), "provider a must stay online")
 	assert.True(t, b.IsOnline(), "provider b must stay online")
 }
+
+// rawThenMockEndpoint builds an eth endpoint whose first provider "a" always
+// answers with the given raw body and whose second provider "b" is a normal mock.
+func rawThenMockEndpoint(t *testing.T, rawBody string, methodsB map[string]any) (*core.Endpoint, *core.Provider, *core.Provider) {
+	srvA := rawStatusProvider(t, http.StatusOK, rawBody)
+	srvB := rpctest.NewServer(methodsB, nil)
+	t.Cleanup(srvB.Close)
+
+	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth}
+	a := &core.Provider{Name: "a", Http: srvA.URL, Endpoint: ep}
+	b := &core.Provider{Name: "b", Http: srvB.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{a, b}
+	a.MarkHealthy(0)
+	b.MarkHealthy(0)
+	return ep, a, b
+}
+
+// TestResponseSizeMismatch_FailsOver: a provider answering a single request with
+// more responses than requested is treated as broken and failed over, rather
+// than indexing out of range. Covers both the plain path and the coalesced path,
+// where the panic used to escape singleflight.DoChan and kill the process.
+func TestResponseSizeMismatch_FailsOver(t *testing.T) {
+	const twoResponses = `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":"0x2"}]`
+
+	for name, body := range map[string]string{
+		"plain":     `{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x00"]}`,
+		"coalesced": `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			endpoint, a, b := rawThenMockEndpoint(t, twoResponses, map[string]any{
+				"eth_sendRawTransaction": "0xhash",
+				"eth_getBalance":         "0x10",
+			})
+
+			w := doRPC(endpoint, body)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, "b", w.Header().Get("X-Provider"))
+			assert.False(t, a.IsOnline(), "a returned a malformed response and should be marked unhealthy")
+			assert.True(t, b.IsOnline())
+		})
+	}
+}
+
+// TestSingleResponseInArray_Unwrapped: a provider that wraps the answer to a
+// single request in a one-element array is fine, but the client gets back the
+// single object it asked for.
+func TestSingleResponseInArray_Unwrapped(t *testing.T) {
+	endpoint, _, _ := rawThenMockEndpoint(t, `[{"jsonrpc":"2.0","id":1,"result":"0xhash"}]`, nil)
+
+	// A non-coalesceable method: the coalesced path rebuilds its response anyway.
+	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x00"]}`)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":"0xhash"}`, w.Body.String())
+}
+
+// TestBatchOutOfOrder_AttributedByID: batch responses may come back in any
+// order, so a "method not supported" error is attributed to the request with
+// the matching id, not the request at the same position.
+func TestBatchOutOfOrder_AttributedByID(t *testing.T) {
+	endpoint, a, _ := rawThenMockEndpoint(t,
+		`[{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"the method eth_getLogs does not exist"}},{"jsonrpc":"2.0","id":1,"result":"0x10"}]`,
+		map[string]any{"eth_blockNumber": "0x10", "eth_getLogs": []any{}},
+	)
+
+	w := doRPC(endpoint, `[{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]},{"jsonrpc":"2.0","id":2,"method":"eth_getLogs","params":[{}]}]`)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, a.SupportsMethod("eth_getLogs"), "the error answered id 2, eth_getLogs")
+	assert.True(t, a.SupportsMethod("eth_blockNumber"), "eth_blockNumber must not be blamed for eth_getLogs' error")
+}

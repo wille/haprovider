@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -267,10 +268,25 @@ NextProvider:
 		// logRequest) once the coalesce outcome is known, not here.
 		reqLog := log.With("provider", provider.Name, "request_time", time.Since(start).Round(time.Millisecond).String())
 
+		// Validate the response shape before anything indexes into it: a provider
+		// that returns a different number of responses than we sent requests is
+		// broken (and would otherwise index out of range below).
+		if len(res.Responses) != len(req.Requests) {
+			reqLog.Error("response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
+			provider.MarkUnhealthy(fmt.Errorf("response size mismatch: sent %d requests, got %d responses", len(req.Requests), len(res.Responses)))
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
+			continue NextProvider
+		}
+		// Answer in the shape the client asked for, even if the provider wrapped a
+		// single response in an array.
+		res.IsBatch = req.IsBatch
+
+		methods := responseMethods(req, res)
+
 		// Record one metric per (sub-)request, labeled by method, like the WS path.
 		elapsed := time.Since(start).Seconds()
 		for i, sub := range res.Responses {
-			method := req.Requests[i].Method
+			method := methods[i]
 			if sub.IsError() {
 				metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", method)
 			} else {
@@ -296,7 +312,7 @@ NextProvider:
 				// skip-not-lose to another provider.
 				var mns *rpc.MethodNotSupportedError
 				if errors.As(herr, &mns) {
-					provider.MarkMethodUnsupported(req.Requests[i].Method)
+					provider.MarkMethodUnsupported(methods[i])
 					methodUnsupported = true
 					methodNotSupported = true
 					continue
@@ -307,7 +323,7 @@ NextProvider:
 				// remember the response in case no provider can serve it.
 				var tryNext *rpc.ErrorTryNextProvider
 				if errors.As(herr, &tryNext) {
-					reqLog.Debug("provider cannot serve request, trying next", "error_code", errorCode, "method", req.Requests[i].Method)
+					reqLog.Debug("provider cannot serve request, trying next", "error_code", errorCode, "method", methods[i])
 					lastTryNext = &forwardResult{res: res, provider: provider, dur: time.Since(start)}
 					continue NextProvider
 				}
@@ -317,12 +333,6 @@ NextProvider:
 			}
 		}
 		if methodNotSupported {
-			continue NextProvider
-		}
-
-		if req.IsBatch && len(res.Responses) != len(req.Requests) {
-			reqLog.Error("batch response size mismatch", "request_size", len(req.Requests), "response_size", len(res.Responses))
-			provider.MarkUnhealthy(fmt.Errorf("batch response size mismatch"))
 			continue NextProvider
 		}
 
@@ -349,6 +359,39 @@ NextProvider:
 	return nil, errNoProvidersAvailable
 }
 
+// responseMethods returns, for each response in res, the method of the request
+// it answers. JSON-RPC lets a batch response arrive in any order, so responses
+// are matched to requests by id; a response whose id is missing, unknown or
+// shared by several requests falls back to its position. The caller has already
+// checked that res and req have the same length.
+func responseMethods(req *rpc.BatchRequest, res *rpc.BatchResponse) []string {
+	methods := make([]string, len(res.Responses))
+	if !req.IsBatch {
+		methods[0] = req.Requests[0].Method
+		return methods
+	}
+
+	byID := make(map[string]string, len(req.Requests))
+	dup := make(map[string]bool)
+	for _, sub := range req.Requests {
+		id := sub.GetID()
+		if _, seen := byID[id]; seen {
+			dup[id] = true
+		}
+		byID[id] = sub.Method
+	}
+
+	for i, sub := range res.Responses {
+		id := sub.GetID()
+		if m, ok := byID[id]; ok && id != "" && !dup[id] {
+			methods[i] = m
+		} else {
+			methods[i] = req.Requests[i].Method
+		}
+	}
+	return methods
+}
+
 // logRequest emits the per-request debug log for a completed forward. A non-zero
 // coalesceID means the request was served by a shared (coalesced) upstream call
 // and the id identifies that group.
@@ -372,7 +415,17 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 	// only byte-identical params collapse (a safe, if occasionally conservative, key).
 	key := req.Requests[0].Method + "\x00" + string(req.Requests[0].Params)
 
-	ch := endpoint.Coalescer.DoChan(key, func() (any, error) {
+	ch := endpoint.Coalescer.DoChan(key, func() (_ any, err error) {
+		// singleflight re-raises a panic from a DoChan callback on a fresh
+		// goroutine, which nothing can recover and which kills the process. Turn
+		// it into an error so a bug here fails these requests, not the proxy.
+		defer func() {
+			if p := recover(); p != nil {
+				log.Error("panic in coalesced request", "panic", p, "stack", string(debug.Stack()))
+				err = fmt.Errorf("panic in coalesced request: %v", p)
+			}
+		}()
+
 		// Detached context: one client disconnecting must not cancel the shared
 		// upstream call the other coalesced callers are waiting on. It stays bounded
 		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
