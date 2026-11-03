@@ -406,11 +406,13 @@ func (proxy *WebSocketProxy) DialAnyProvider(e *core.Endpoint, timing *servertim
 		err := proxy.DialProvider(e, p)
 		m.Stop()
 
-		// In case the request was closed before the provider connection was established
-		// return to not treat the error as a provider error
+		// The client went away while we were dialing: give up without treating
+		// it as a provider error. If the dial did succeed, nobody will use that
+		// connection, so close it rather than leak it. (On a failed dial there's
+		// no connection, and ProviderConn is nil.)
 		select {
 		case <-proxy.ctx.Done():
-			if err != nil {
+			if err == nil {
 				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
 			}
 			return nil, proxy.ctx.Err()
