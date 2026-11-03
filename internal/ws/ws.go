@@ -7,9 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	servertiming "github.com/mitchellh/go-server-timing"
@@ -450,6 +447,17 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 		return
 	}
 
+	// Register the connection for graceful shutdown. Once shutdown has begun,
+	// refuse it rather than open a connection that is closed straight away.
+	tracker := connections
+	if !tracker.add() {
+		proxy.log.Info("refusing connection, shutting down")
+		proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+		writeHandshakeError(w, http.StatusServiceUnavailable, rpc.CodeNoProvidersAvailable, "shutting down")
+		return
+	}
+	defer tracker.done()
+
 	// gorilla writes its own 101 handshake response and ignores w.Header(), so
 	// any headers we want the client to see must be passed to Upgrade.
 	respHeader := http.Header{}
@@ -482,10 +490,8 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 
 	proxy.log.Info("ws open", "client_version", provider.ClientVersion(), "request_time", time.Since(start).Round(time.Millisecond).String())
 
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-
 	t := time.NewTicker(PrimaryProviderCheckInterval)
+	defer t.Stop()
 
 	for {
 		select {
@@ -500,8 +506,8 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 				return
 			}
 
-		// Gracefully close the connection both ways
-		case <-interrupt:
+		// Shutting down (see CloseAll): gracefully close the connection both ways
+		case <-tracker.shutdown:
 			proxy.logClose(slog.LevelInfo, "ws closed, shutting down", nil)
 			proxy.ClientConn.Close(websocket.CloseGoingAway, fmt.Errorf("haprovider shutting down"))
 			proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)

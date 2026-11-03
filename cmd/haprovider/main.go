@@ -271,6 +271,10 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Shutdown doesn't track hijacked (WebSocket) connections: have it close
+	// them gracefully, then wait for them below.
+	mainServer.RegisterOnShutdown(ws.CloseAll)
+
 	// Metrics server (optional)
 	var metricsServer *http.Server
 
@@ -330,6 +334,9 @@ func main() {
 		_ = metricsServer.Shutdown(ctx)
 	}
 	_ = mainServer.Shutdown(ctx)
+	if err := ws.Wait(ctx); err != nil {
+		slog.Warn("websocket connections did not close before the shutdown timeout", "error", err)
+	}
 
 	// If we exited due to a server error, terminate with non-zero status
 	if hadServerError {
