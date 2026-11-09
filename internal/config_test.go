@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wille/haprovider/internal/redact"
 )
@@ -174,5 +175,35 @@ endpoints:
 		if strings.Contains(s, "qn-secret") {
 			t.Errorf("%q leaks the expanded token", s)
 		}
+	}
+}
+
+func TestLoadConfig_StallTimeout(t *testing.T) {
+	config, err := loadConfig(t, `
+endpoints:
+  eth:
+    stall_timeout: 90s
+    providers:
+      - http: https://example.com
+  base:
+    stall_timeout: 0s
+    providers:
+      - http: https://example.com
+  polygon:
+    providers:
+      - http: https://example.com
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := config.Endpoints["eth"].StallTimeout; got == nil || *got != 90*time.Second {
+		t.Errorf("eth stall_timeout = %v, want 90s", got)
+	}
+	if got := config.Endpoints["base"].StallTimeout; got == nil || *got != 0 {
+		t.Errorf("base stall_timeout = %v, want 0 (disabled)", got)
+	}
+	if got := config.Endpoints["polygon"].StallTimeout; got != nil {
+		t.Errorf("polygon stall_timeout = %v, want unset", *got)
 	}
 }

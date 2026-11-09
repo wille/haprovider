@@ -3,6 +3,7 @@ package healthcheck
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/wille/haprovider/internal/chain"
@@ -17,8 +18,29 @@ var defaultBlockLagTolerance = map[core.Kind]int{
 	core.KindBTC:    0,
 }
 
+// defaultStallTimeout is how long a provider's block height may stay unchanged
+// while another provider reports a higher one before it's considered stalled.
+// Bitcoin blocks can be more than an hour apart, so it gets far longer.
+var defaultStallTimeout = map[core.Kind]time.Duration{
+	core.KindEth:    2 * time.Minute,
+	core.KindSolana: 2 * time.Minute,
+	core.KindTron:   2 * time.Minute,
+	core.KindBTC:    2 * time.Hour,
+}
+
+// minProvidersForMedian is how many providers must report a block height
+// before their median is used to judge one of them behind or ahead. With fewer
+// there is no majority: of two providers that disagree, nothing tells the one
+// lagging behind from the one lying ahead, and judging by the higher one would
+// let a single provider push the other out of rotation.
+const minProvidersForMedian = 3
+
+// minAheadTolerance is the least a provider may lead the median by before it's
+// considered ahead, so a node that is just first to see a new block isn't
+// taken out when block_lag_tolerance is 0 (the Bitcoin default).
+const minAheadTolerance = 3
+
 // Run the healthcheck for a provider, dispatching on the endpoint Kind.
-// the endpoint Kind. The read closure issues RPC requests over HTTP to the provider.
 func Run(ctx context.Context, p *core.Provider) error {
 	c := chain.New(p.Endpoint.Kind)
 	if c == nil {
@@ -27,39 +49,120 @@ func Run(ctx context.Context, p *core.Provider) error {
 
 	nodeInfo, err := c.Healthcheck(ctx, p)
 	if err != nil {
+		// Unreachable, rate limited or syncing: its last height no longer says
+		// where the chain is, so don't measure other providers against it.
+		p.StopReporting()
 		return err
 	}
 
 	p.SetClientVersion(nodeInfo.ClientVersion)
 
 	if err := p.Endpoint.SetChainID(nodeInfo.ChainID); err != nil {
+		p.StopReporting()
 		return err
 	}
 
-	blockLagTolerance := defaultBlockLagTolerance[p.Endpoint.Kind]
-	if p.Endpoint.BlockLagTolerance != nil {
-		blockLagTolerance = max(*p.Endpoint.BlockLagTolerance, 0)
+	return checkHeight(p, nodeInfo.BlockHeight, time.Now())
+}
+
+// checkHeight records the block height p reported at now and judges it
+// against the endpoint's other providers. p fails if it is:
+//
+//   - behind: more than the tolerance below the median height;
+//   - ahead: its previous report was more than the tolerance above the median
+//     of the reports the others have made since;
+//   - stalled: its height hasn't moved for the stall timeout while another
+//     provider reports a higher one.
+//
+// The median needs minProvidersForMedian reports, so one provider reporting a
+// wrong height can't push the others out of rotation. A report is only ever
+// compared with ones made before it (behind) or after it (ahead), so the time
+// between healthchecks works in the judged provider's favour: on a fast chain
+// an older report is lower than the chain is now.
+func checkHeight(p *core.Provider, height uint64, now time.Time) error {
+	e := p.Endpoint
+
+	tolerance := uint64(defaultBlockLagTolerance[e.Kind])
+	if e.BlockLagTolerance != nil {
+		tolerance = uint64(max(*e.BlockLagTolerance, 0))
 	}
 
-	if nodeInfo.BlockHeight > p.HighestBlock() {
-		p.SetHighestBlock(nodeInfo.BlockHeight)
+	prev, lastAdvance := p.RecordHeight(height, now)
+	peers := peerHeights(p)
+
+	// Behind: the new report against the others' latest, all made before it.
+	heights := []uint64{height}
+	for _, r := range peers {
+		heights = append(heights, r.Height)
+	}
+	if len(heights) >= minProvidersForMedian {
+		// The lower median: with an even count, the one kinder to p.
+		median, _ := medians(heights)
+		// Written as height+tolerance < median so it can't wrap around when the
+		// median is below the tolerance.
+		if height+tolerance < median {
+			return fmt.Errorf("node is behind: currentBlock=%d, medianBlock=%d missing=%d", height, median, median-height)
+		}
 	}
 
-	// Compare against the endpoint's tip, the highest block any of its
-	// providers has reported, so a node that has stalled (stopped advancing
-	// without reporting that it's syncing) is caught once the others move on.
-	// Written as height+tolerance < tip so it can't wrap around when the tip is
-	// below the tolerance.
-	tip := p.Endpoint.HighestBlock()
-	if nodeInfo.BlockHeight+uint64(blockLagTolerance) < tip {
-		return fmt.Errorf("node is behind: currentBlock=%d, highestBlock=%d missing=%d", nodeInfo.BlockHeight, tip, tip-nodeInfo.BlockHeight)
+	// Ahead: the previous report against the others' reports made after it.
+	if !prev.At.IsZero() {
+		heights := []uint64{prev.Height}
+		for _, r := range peers {
+			if r.At.After(prev.At) {
+				heights = append(heights, r.Height)
+			}
+		}
+		if len(heights) >= minProvidersForMedian {
+			// The upper median: with an even count, the one kinder to p.
+			_, median := medians(heights)
+			if prev.Height > median+max(tolerance, minAheadTolerance) {
+				return fmt.Errorf("node is ahead of the other providers: reportedBlock=%d, medianBlock=%d", prev.Height, median)
+			}
+		}
 	}
 
-	// Only a provider that passed every check may raise the tip, so one that
-	// is failing for some other reason can't push the others out of rotation.
-	p.Endpoint.ObserveBlock(nodeInfo.BlockHeight)
+	// Stalled: not moving while another provider is further along. Requiring a
+	// higher peer means a chain that has halted takes nobody out, and a
+	// provider lying about its height can't make one that is still advancing
+	// look stalled.
+	stallTimeout := defaultStallTimeout[e.Kind]
+	if e.StallTimeout != nil {
+		stallTimeout = *e.StallTimeout
+	}
+	if stalled := now.Sub(lastAdvance); stallTimeout > 0 && stalled > stallTimeout {
+		highest := height
+		for _, r := range peers {
+			highest = max(highest, r.Height)
+		}
+		if highest > height {
+			return fmt.Errorf("node is stalled: currentBlock=%d unchanged for %s, highestBlock=%d", height, stalled.Round(time.Second), highest)
+		}
+	}
 
 	return nil
+}
+
+// peerHeights returns the latest height reports of the other providers of p's
+// endpoint that are still reporting.
+func peerHeights(p *core.Provider) []core.HeightReport {
+	var peers []core.HeightReport
+	for _, q := range p.Endpoint.Providers {
+		if q == p {
+			continue
+		}
+		if r, ok := q.Height(); ok {
+			peers = append(peers, r)
+		}
+	}
+	return peers
+}
+
+// medians sorts heights in place and returns its lower and upper median, which
+// are the same for an odd count. heights must not be empty.
+func medians(heights []uint64) (lower, upper uint64) {
+	slices.Sort(heights)
+	return heights[(len(heights)-1)/2], heights[len(heights)/2]
 }
 
 func Worker(p *core.Provider, defaultHealthcheckInterval time.Duration) {
