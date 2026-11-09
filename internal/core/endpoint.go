@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -56,20 +57,22 @@ type Endpoint struct {
 	// AddXForwardedHeaders adds X-Forwarded-For header to requests sent to upstream providers
 	AddXForwardedHeaders bool `yaml:"add_xfwd_headers,omitempty"`
 
+	// BlockLagTolerance is how many blocks a provider may trail (or lead) the
+	// median height of the endpoint's providers. Unset uses a per-chain default.
 	BlockLagTolerance *int `yaml:"block_lag_tolerance,omitempty"`
+
+	// StallTimeout is how long a provider's block height may stay unchanged
+	// while another provider reports a higher one before it's considered
+	// stalled. Unset uses a per-chain default; 0 disables the check.
+	StallTimeout *time.Duration `yaml:"stall_timeout,omitempty"`
 
 	// MaxResponseSize caps the size in bytes of an upstream provider response.
 	// Unset uses DefaultMaxResponseSize; 0 means unlimited.
 	MaxResponseSize *int64 `yaml:"max_response_size,omitempty"`
 
-	// mu guards ChainID and highestBlock, which are set/validated concurrently
-	// by per-provider healthcheck goroutines sharing this endpoint.
+	// mu guards ChainID, which is set/validated concurrently by per-provider
+	// healthcheck goroutines sharing this endpoint.
 	mu sync.Mutex
-
-	// highestBlock is the chain tip: the highest block height reported by any
-	// of this endpoint's providers in a passing healthcheck. Providers are
-	// checked against it for block lag. Guarded by mu.
-	highestBlock uint64
 
 	// Coalescer deduplicates identical concurrent upstream requests on the HTTP
 	// path. The zero value is ready to use; keys are scoped to this endpoint.
@@ -102,24 +105,6 @@ func (e *Endpoint) GetChainID() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.ChainID
-}
-
-// HighestBlock returns the highest block height any provider of this endpoint
-// has reported in a passing healthcheck, or 0 if none has yet.
-func (e *Endpoint) HighestBlock() uint64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.highestBlock
-}
-
-// ObserveBlock records a block height reported by a provider that passed its
-// healthcheck, raising the endpoint's highest block if it's higher.
-func (e *Endpoint) ObserveBlock(height uint64) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if height > e.highestBlock {
-		e.highestBlock = height
-	}
 }
 
 // Logger returns a structured logger tagged with the endpoint name.

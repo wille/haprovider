@@ -158,4 +158,7 @@ endpoints:
 # Optional per-endpoint fields:
 #   public: true                   # hide debug headers / detailed errors from clients
 #   add_xfwd_headers: true         # add X-Forwarded-For to upstream requests
-#   block_lag_tolerance: 50        # max blocks a provider may trail the highest seen
+#   block_lag_tolerance: 50        # max blocks a provider may trail (or lead) the median
+#                                  # height of the providers (needs 3+ providers)
+#   stall_timeout: 2m              # how long a provider's height may stay unchanged
+#                                  # while another is further along (0 disables)

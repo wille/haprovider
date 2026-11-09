@@ -52,8 +52,18 @@ type Provider struct {
 	// The time the provider last changed state (online or offline)
 	lastStateChange time.Time
 
-	// The highest block observed for the provider
-	highestBlock uint64
+	// height is the provider's latest block height report, from a healthcheck
+	// that got past the chain checks.
+	height HeightReport
+
+	// reporting is whether height still says where the chain is: false until
+	// the first report, and after a healthcheck fails before reaching the
+	// height checks (unreachable, rate limited, syncing, wrong chain), so
+	// other providers aren't measured against it.
+	reporting bool
+
+	// lastAdvance is when the reported height last went up.
+	lastAdvance time.Time
 
 	// The latest client version observed for the provider
 	clientVersion string
@@ -146,7 +156,7 @@ func (p *Provider) MarkHealthy(took time.Duration) {
 
 	// GetChainID takes the endpoint lock, not p.m, so calling it while we hold
 	// p.m is safe (lock order is always p.m -> Endpoint.mu, never the reverse).
-	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.GetChainID(), "block_height", p.highestBlock, "took", took.Round(time.Millisecond).String())
+	p.Logger().Info("provider connected", "client_version", p.clientVersion, "chain_id", p.Endpoint.GetChainID(), "block_height", p.height.Height, "took", took.Round(time.Millisecond).String())
 
 }
 
@@ -234,17 +244,46 @@ func (p *Provider) GetLastStateChange() time.Time {
 	return p.lastStateChange
 }
 
-// HighestBlock returns the highest block observed across healthchecks for the provider.
-func (p *Provider) HighestBlock() uint64 {
-	p.m.Lock()
-	defer p.m.Unlock()
-	return p.highestBlock
+// HeightReport is a block height a provider reported in a healthcheck, and
+// when.
+type HeightReport struct {
+	Height uint64
+	At     time.Time
 }
 
-func (p *Provider) SetHighestBlock(b uint64) {
+// RecordHeight records the block height the provider reported at now, in a
+// healthcheck that got past the chain checks. It returns the report before
+// this one (zero if there was none) and when the height last went up.
+func (p *Provider) RecordHeight(height uint64, now time.Time) (prev HeightReport, lastAdvance time.Time) {
 	p.m.Lock()
 	defer p.m.Unlock()
-	p.highestBlock = b
+
+	prev = p.height
+	if p.lastAdvance.IsZero() || height > prev.Height {
+		p.lastAdvance = now
+	}
+	p.height = HeightReport{Height: height, At: now}
+	p.reporting = true
+
+	return prev, p.lastAdvance
+}
+
+// StopReporting marks the provider's latest height as no longer saying where
+// the chain is, so other providers aren't measured against it until it
+// reports again. The report itself is kept, so a stalled provider that drops
+// out and comes back at the same height is still seen as stalled.
+func (p *Provider) StopReporting() {
+	p.m.Lock()
+	defer p.m.Unlock()
+	p.reporting = false
+}
+
+// Height returns the provider's latest height report, and whether it still
+// says where the chain is (see StopReporting).
+func (p *Provider) Height() (HeightReport, bool) {
+	p.m.Lock()
+	defer p.m.Unlock()
+	return p.height, p.reporting
 }
 
 // ClientVersion returns the node software version reported by the provider.
