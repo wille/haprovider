@@ -17,6 +17,8 @@ flowchart LR
 
 Providers are tried in priority order; an unhealthy one is taken out of rotation and re-checked in the background until it recovers.
 
+A WebSocket connection stays with the provider it was opened to. If that provider has been out of rotation for 30 seconds and another provider with a WebSocket URL is healthy, haprovider closes the connection with code 1012 (service restart) so the client reconnects to a healthy one. It does the same once the primary provider has been back for 5 minutes, to move clients back to it.
+
 ### Reasons for using haprovider
 
 - Zero downtime - RPC providers can and will have trouble providing you uninterrupted 24/7 access. You should have at least two providers powering your access to a chain, like your own node and a service like Infura as a backup.

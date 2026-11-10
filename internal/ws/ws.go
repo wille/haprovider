@@ -39,6 +39,36 @@ const (
 	PrimaryProviderAliveThreshold = 5 * time.Minute
 )
 
+// Vars rather than consts so tests can shorten them.
+var (
+	// ProviderHealthCheckInterval is how often a connection checks whether its
+	// provider has been taken out of rotation.
+	ProviderHealthCheckInterval = 5 * time.Second
+
+	// UnhealthyProviderGracePeriod is how long a connection's provider must
+	// have been out of rotation before the connection is closed, so a provider
+	// marked unhealthy by one failed request (which the healthcheck usually
+	// clears within seconds) doesn't disconnect all its clients.
+	UnhealthyProviderGracePeriod = 30 * time.Second
+)
+
+// leaveUnhealthyProvider reports whether a connection to provider should be
+// closed so its client reconnects to another: provider has been out of
+// rotation (behind, stalled, on the wrong chain, rate limited, ...) for longer
+// than UnhealthyProviderGracePeriod, and another provider with a WebSocket URL
+// is healthy. With nowhere better to go, closing would only cut the stream.
+func leaveUnhealthyProvider(endpoint *core.Endpoint, provider *core.Provider) bool {
+	if provider.IsOnline() || time.Since(provider.GetLastStateChange()) < UnhealthyProviderGracePeriod {
+		return false
+	}
+	for _, p := range endpoint.Providers {
+		if p != provider && p.Ws != "" && p.IsOnline() {
+			return true
+		}
+	}
+	return false
+}
+
 var ErrNoProvidersAvailable = errors.New("no providers available")
 
 // errProxyClosed is the cancel cause once the connection handler has returned.
@@ -535,8 +565,23 @@ func IncomingWebsocketHandler(ctx context.Context, endpoint *core.Endpoint, w ht
 	t := time.NewTicker(PrimaryProviderCheckInterval)
 	defer t.Stop()
 
+	health := time.NewTicker(ProviderHealthCheckInterval)
+	defer health.Stop()
+
 	for {
 		select {
+		// The provider was taken out of rotation and stayed out: without this the
+		// client would keep receiving whatever it sends (stale heads, another
+		// chain's data) for as long as the connection lasts. Close it so the
+		// client reconnects to a healthy provider.
+		case <-health.C:
+			if leaveUnhealthyProvider(endpoint, provider) {
+				proxy.logClose(slog.LevelWarn, "provider unhealthy, closing connection", nil)
+				proxy.ClientConn.Close(websocket.CloseServiceRestart, fmt.Errorf("provider unhealthy"))
+				proxy.ProviderConn.Close(websocket.CloseGoingAway, nil)
+				return
+			}
+
 		// Check if the primary provider is back online and close the connection so the client can reconnect
 		case <-t.C:
 			primaryProvider := endpoint.Providers[0]
