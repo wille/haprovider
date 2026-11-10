@@ -57,6 +57,18 @@ type Endpoint struct {
 	// AddXForwardedHeaders adds X-Forwarded-For header to requests sent to upstream providers
 	AddXForwardedHeaders bool `yaml:"add_xfwd_headers,omitempty"`
 
+	// Verify cross-checks the results of the methods the chain lists (balances,
+	// contract reads, chain height) against a second provider on the HTTP path,
+	// so a single provider can't get a wrong answer through. Best effort: when
+	// no other provider answers, the result is sent unverified.
+	Verify bool `yaml:"verify,omitempty"`
+
+	// VerifyRetryDelay is how long to wait before asking two disagreeing
+	// providers once more, when verify is enabled. Honest providers a block
+	// apart disagree on a value that changed in that block, and have usually
+	// caught up by then. Unset uses DefaultVerifyRetryDelay; 0 disables it.
+	VerifyRetryDelay *time.Duration `yaml:"verify_retry_delay,omitempty"`
+
 	// BlockLagTolerance is how many blocks a provider may trail (or lead) the
 	// median height of the endpoint's providers. Unset uses a per-chain default.
 	BlockLagTolerance *int `yaml:"block_lag_tolerance,omitempty"`
@@ -110,6 +122,19 @@ func (e *Endpoint) GetChainID() string {
 // Logger returns a structured logger tagged with the endpoint name.
 func (e *Endpoint) Logger() *slog.Logger {
 	return slog.With("endpoint", e.Name)
+}
+
+// DefaultVerifyRetryDelay is how long to wait before asking two disagreeing
+// providers once more (see Endpoint.VerifyRetryDelay).
+const DefaultVerifyRetryDelay = time.Second
+
+// GetVerifyRetryDelay returns how long to wait before asking two disagreeing
+// providers once more, or 0 if they aren't asked again.
+func (e *Endpoint) GetVerifyRetryDelay() time.Duration {
+	if e.VerifyRetryDelay != nil {
+		return max(*e.VerifyRetryDelay, 0)
+	}
+	return DefaultVerifyRetryDelay
 }
 
 // GetMaxResponseSize returns the upstream response size cap in bytes, or

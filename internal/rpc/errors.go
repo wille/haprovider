@@ -52,6 +52,11 @@ const (
 	// CodeNoProvidersAvailable is a haprovider-specific code (outside the standard
 	// ranges) returned when no provider can currently serve the request.
 	CodeNoProvidersAvailable = -39200
+
+	// CodeProvidersDisagree is a haprovider-specific code returned, on an
+	// endpoint with verify enabled, when providers returned contradicting
+	// results for a request and no majority settled which one is right.
+	CodeProvidersDisagree = -39201
 )
 
 var ErrorResponseNoProvidersAvailable = Response{

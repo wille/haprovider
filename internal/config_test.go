@@ -259,3 +259,42 @@ func TestLoadConfig_Example(t *testing.T) {
 		t.Fatalf("config.example.yml: %v", err)
 	}
 }
+
+func TestLoadConfig_Verify(t *testing.T) {
+	config, err := loadConfig(t, `
+endpoints:
+  eth:
+    chainId: "1"
+    verify: true
+    verify_retry_delay: 500ms
+    providers:
+      - http: https://example.com
+  base:
+    chainId: "8453"
+    verify: true
+    verify_retry_delay: 0s
+    providers:
+      - http: https://example.com
+  polygon:
+    chainId: "137"
+    providers:
+      - http: https://example.com
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eth, base, polygon := config.Endpoints["eth"], config.Endpoints["base"], config.Endpoints["polygon"]
+	if !eth.Verify || !base.Verify || polygon.Verify {
+		t.Errorf("verify = %v/%v/%v, want true/true/false", eth.Verify, base.Verify, polygon.Verify)
+	}
+	if got := eth.GetVerifyRetryDelay(); got != 500*time.Millisecond {
+		t.Errorf("eth retry delay = %s, want 500ms", got)
+	}
+	if got := base.GetVerifyRetryDelay(); got != 0 {
+		t.Errorf("base retry delay = %s, want 0 (no retry)", got)
+	}
+	if got := polygon.GetVerifyRetryDelay(); got != time.Second {
+		t.Errorf("polygon retry delay = %s, want the 1s default", got)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -99,7 +100,7 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		return
 	}
 
-	result, err := forwardWithFailover(ctx, endpoint, req, timing, log)
+	result, err := forwardChecked(ctx, endpoint, req, timing, log)
 	if err != nil {
 		writeForwardError(w, err, log)
 		return
@@ -182,8 +183,9 @@ func methodsWithoutProvider(endpoint *core.Endpoint, req *rpc.BatchRequest) []st
 // first successful response and the provider that produced it. It records
 // per-request metrics and marks providers unhealthy on failure. It returns
 // ctx.Err() if the context is cancelled mid-flight, or errNoProvidersAvailable
-// when no provider could serve the request.
-func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
+// when no provider could serve the request. Providers in skip are not tried
+// (used to cross-check a result with a provider that hasn't given one).
+func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger, skip ...*core.Provider) (*forwardResult, error) {
 	// Set when at least one provider skipped or rejected a requested method as
 	// unsupported, so exhaustion can report "no provider for method X" instead of
 	// the generic "no providers available".
@@ -200,7 +202,7 @@ func forwardWithFailover(ctx context.Context, endpoint *core.Endpoint, req *rpc.
 
 NextProvider:
 	for _, provider := range endpoint.Providers {
-		if !provider.IsOnline() {
+		if !provider.IsOnline() || slices.Contains(skip, provider) {
 			continue
 		}
 
@@ -439,7 +441,9 @@ func coalesceRequest(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batc
 		// Detached context: one client disconnecting must not cancel the shared
 		// upstream call the other coalesced callers are waiting on. It stays bounded
 		// by the per-provider timeout inside httpx, and preserves ctx values (XFF).
-		result, err := forwardWithFailover(context.WithoutCancel(ctx), endpoint, req, timing, log)
+		// Cross-checked inside the shared call, so every coalesced caller gets
+		// the checked result.
+		result, err := forwardChecked(context.WithoutCancel(ctx), endpoint, req, timing, log)
 		if err != nil {
 			return nil, err
 		}

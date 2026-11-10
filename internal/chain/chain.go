@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wille/haprovider/internal/chain/btc"
 	"github.com/wille/haprovider/internal/chain/eth"
@@ -9,6 +10,7 @@ import (
 	"github.com/wille/haprovider/internal/chain/tron"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/rpc"
+	"github.com/wille/haprovider/internal/verify"
 )
 
 type ErrorAction int
@@ -47,6 +49,14 @@ type Chain interface {
 	// Most chains allow everything; Bitcoin restricts clients to blockchain-query
 	// RPCs and rejects wallet/mining/control/etc. commands.
 	AllowMethod(method string) bool
+
+	// Verifier returns how to cross-check a result for a call to method with
+	// params against a second provider's when the endpoint has verify enabled,
+	// or nil when the call isn't cross-checked. Default-deny: only the reads a
+	// payment processor credits deposits from (balances, contract reads, chain
+	// height) are listed, and not at a block or commitment level honest
+	// providers rarely agree on (e.g. eth's pending block).
+	Verifier(method string, params json.RawMessage) verify.Func
 }
 
 var (
