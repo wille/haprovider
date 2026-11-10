@@ -191,8 +191,8 @@ the config file. See [Environment variables](#environment-variables).
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `providers`: List of provider configurations
     - `name`: Provider identifier (optional, defaults to the `http` URL's host)
-    - `http`: HTTP endpoint URL (required, expands `${ENV_VAR}`)
-    - `ws`: WebSocket endpoint URL (optional, expands `${ENV_VAR}`)
+    - `http`: HTTP endpoint URL (required, expands `${ENV_VAR}`). Redirects are never followed: a provider that answers with one is treated as failing, so configure the final URL (e.g. `https://`, not an `http://` that redirects to it).
+    - `ws`: WebSocket endpoint URL (optional, expands `${ENV_VAR}`). Redirects on the handshake are not followed either.
     - `headers`: Extra headers sent to the provider (optional, values expand `${ENV_VAR}`)
     - `timeout`: Request timeout (optional, default 10s)
 

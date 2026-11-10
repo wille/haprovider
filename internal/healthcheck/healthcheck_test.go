@@ -3,6 +3,8 @@ package healthcheck
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -411,4 +413,22 @@ func TestRunOnce_Failure(t *testing.T) {
 	next := runOnce(p, 30*time.Second)
 	assert.False(t, p.IsOnline(), "a failing check marks the provider offline")
 	assert.Equal(t, 10*time.Second, next, "first failure backs off to nextAttemptDelay(0)")
+}
+
+// TestRun_Redirect: a provider that redirects fails its healthcheck, so it
+// stays out of rotation until it stops redirecting.
+func TestRun_Redirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://example.com/rpc", http.StatusMovedPermanently)
+	}))
+	t.Cleanup(srv.Close)
+
+	ep := &core.Endpoint{Name: "test", Kind: core.KindEth}
+	p := &core.Provider{Name: "p", Http: srv.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{p}
+
+	err := Run(context.Background(), p)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "redirect")
+	}
 }

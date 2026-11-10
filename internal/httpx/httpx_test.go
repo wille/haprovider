@@ -4,12 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
+	"github.com/wille/haprovider/internal/rpc"
 )
 
 func TestForwardedFor(t *testing.T) {
@@ -118,4 +121,76 @@ func TestReadUpstreamBody_WithinLimit(t *testing.T) {
 	b, err := httpx.SendHTTPRequest(context.Background(), p, p.Http, []byte("{}"))
 	assert.NoError(t, err)
 	assert.Equal(t, body, string(b))
+}
+
+// redirectingProvider returns a provider whose upstream answers every request
+// with a redirect of the given status to a target server, the number of times
+// the target was contacted, and the target's host. The provider carries an API
+// key in its URL path and in a header, as a real one would.
+func redirectingProvider(t *testing.T, status int) (*core.Provider, *atomic.Int32, string) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":"0xdeadbeef"}`))
+	}))
+	t.Cleanup(target.Close)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", status)
+	}))
+	t.Cleanup(upstream.Close)
+
+	ep := &core.Endpoint{Name: "t", Kind: core.KindEth}
+	p := &core.Provider{
+		Name:     "p",
+		Http:     upstream.URL + "/v3/SECRETKEY",
+		Endpoint: ep,
+		Headers:  map[string]string{"X-Api-Key": "SECRETHEADER"},
+	}
+	ep.Providers = []*core.Provider{p}
+
+	u, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, &hits, u.Host
+}
+
+// TestSendRPCBatchRequest_RedirectNotFollowed: a redirect is never followed, so
+// the request (with the provider's API key in its URL and headers) never
+// reaches the host it names, and that host's answer is never taken for the
+// provider's.
+func TestSendRPCBatchRequest_RedirectNotFollowed(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		p, hits, host := redirectingProvider(t, status)
+
+		res, err := httpx.SendRPCBatchRequest(context.Background(), p, rpc.NewBatchRequest(rpc.NewRequest("1", "eth_blockNumber", nil)))
+
+		assert.Nil(t, res, "status %d", status)
+		var re *httpx.RedirectError
+		if assert.ErrorAs(t, err, &re, "status %d", status) {
+			assert.Equal(t, status, re.Code)
+			assert.Equal(t, host, re.Host)
+			assert.NotContains(t, err.Error(), "elsewhere", "only the target host is kept")
+			assert.NotContains(t, err.Error(), "SECRET")
+		}
+		assert.Zero(t, hits.Load(), "status %d: the redirect target must not be contacted", status)
+	}
+}
+
+func TestForwardHTTPRequest_RedirectNotFollowed(t *testing.T) {
+	p, hits, _ := redirectingProvider(t, http.StatusTemporaryRedirect)
+
+	res, err := httpx.ForwardHTTPRequest(context.Background(), p, http.MethodPost, p.Http, []byte(`{}`), "")
+
+	assert.Nil(t, res)
+	var re *httpx.RedirectError
+	assert.ErrorAs(t, err, &re)
+	assert.Zero(t, hits.Load())
 }

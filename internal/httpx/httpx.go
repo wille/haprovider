@@ -31,6 +31,33 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("http %d", e.Code)
 }
 
+// RedirectError is returned when an upstream answers with a redirect, which
+// is never followed (see client). It's a provider failure: the request fails
+// over and the provider is marked unhealthy.
+type RedirectError struct {
+	Code int
+
+	// Host is the host the provider redirected to, or "" if it named none. Only
+	// the host is kept, so no API key in the target URL can reach the logs.
+	Host string
+}
+
+func (e *RedirectError) Error() string {
+	return fmt.Sprintf("http %d: provider redirected to %q, redirects are not followed", e.Code, e.Host)
+}
+
+// redirectError returns a RedirectError if resp is a redirect, or nil.
+func redirectError(resp *http.Response) error {
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return nil
+	}
+	var host string
+	if loc, err := resp.Location(); err == nil {
+		host = loc.Host
+	}
+	return &RedirectError{Code: resp.StatusCode, Host: host}
+}
+
 // Version is the haprovider build version, set via -ldflags at build time.
 var Version = "dev"
 
@@ -42,6 +69,16 @@ var UserAgent = fmt.Sprintf("haprovider/%s (+https://github.com/wille/haprovider
 // a handful of upstream hosts, rather than the stdlib default of a few
 // connections each to many hosts.
 var client = &http.Client{
+	// Never follow a redirect. A provider endpoint has no reason to send one,
+	// and following it would re-send the request, with the provider's headers
+	// (API keys included) and a Referer carrying its URL (often with a key in
+	// the path), to whatever host it names, and pass that host's answer off
+	// as the provider's. The redirect comes back as the response instead,
+	// which SendHTTPRequest and ForwardHTTPRequest turn into a RedirectError.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 
@@ -197,6 +234,12 @@ func SendHTTPRequest(ctx context.Context, provider *core.Provider, rawURL string
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// No body: a redirect page is not a JSON-RPC answer, and must never be
+	// mistaken for one.
+	if err := redirectError(resp); err != nil {
+		return nil, err
+	}
+
 	b, err := readUpstreamBody(provider, resp.Body)
 	if err != nil {
 		return nil, err
@@ -316,6 +359,12 @@ func ForwardHTTPRequest(ctx context.Context, provider *core.Provider, method, ra
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	// A redirect is a provider failure here too, rather than a response to
+	// pass on (without its Location header, it would be no use to the client).
+	if err := redirectError(resp); err != nil {
+		return nil, err
+	}
 
 	b, err := readUpstreamBody(provider, resp.Body)
 	if err != nil {

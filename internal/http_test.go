@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	servertiming "github.com/mitchellh/go-server-timing"
@@ -659,4 +660,59 @@ func TestHTTPAPI_PaymentRequiredBacksOff(t *testing.T) {
 	assert.Equal(t, "b", w.Header().Get("X-Provider"))
 	assert.False(t, ps[0].IsOnline())
 	assert.False(t, ps[0].GetNextCheckTime().IsZero(), "a should be backed off until its rate limit passes")
+}
+
+// TestRedirect_FailsOver: a provider that redirects is a failing provider: the
+// request fails over to the next one, the redirecting provider is marked
+// unhealthy, and the host it redirects to is never contacted.
+func TestRedirect_FailsOver(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0xdeadbeef"}`))
+	}))
+	t.Cleanup(target.Close)
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	good := rpctest.NewServer(map[string]any{"eth_blockNumber": "0x10"}, nil)
+	t.Cleanup(good.Close)
+
+	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth}
+	a := &core.Provider{Name: "a", Http: redirecting.URL, Endpoint: ep}
+	b := &core.Provider{Name: "b", Http: good.URL, Endpoint: ep}
+	ep.Providers = []*core.Provider{a, b}
+	a.MarkHealthy(0)
+	b.MarkHealthy(0)
+
+	w := doRPC(ep, blockNumberReq)
+
+	res, err := rpc.DecodeResponse(w.Body.Bytes())
+	if assert.NoError(t, err) {
+		assert.JSONEq(t, `"0x10"`, string(res.Result))
+	}
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, a.IsOnline(), "the redirecting provider is marked unhealthy")
+	assert.Zero(t, hits.Load(), "the redirect target is never contacted")
+}
+
+// TestHTTPAPI_RedirectFailsOver: on the TRON HTTP API passthrough a redirect
+// is a provider failure too, rather than a response passed to the client.
+func TestHTTPAPI_RedirectFailsOver(t *testing.T) {
+	endpoint, providers := tronAPIEndpoint(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://example.com/elsewhere", http.StatusFound)
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		},
+	)
+
+	w := doAPI(endpoint, http.MethodPost, "/tron/wallet/getnowblock")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"ok":true}`, w.Body.String())
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, providers[0].IsOnline())
 }
