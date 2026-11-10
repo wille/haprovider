@@ -398,11 +398,28 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_total_connections`: Total WebSocket connections established
 - `haprovider_provider_health`: Provider health status (1=healthy, 0=unhealthy)
 - `haprovider_provider_uptime_seconds`: How long the provider has been continuously online, in seconds (0 if offline)
+- `haprovider_provider_block_height`: The block height each provider last reported in a healthcheck (labels: endpoint, provider), including one judged behind, ahead or stalled. Absent while the provider isn't reporting one (unreachable, syncing, on the wrong chain)
 - `haprovider_verified_results_total`: Results cross-checked against another provider on endpoints with `verify: true` (labels: endpoint, method, outcome). `outcome` is `agree`, `agree_after_retry` (they disagreed, then agreed when asked again: providers a block apart), `majority` (a third provider settled a disagreement), `disagree` (no majority; the client got an error) or `unverified` (no other provider answered). `majority` and `disagree` mean a provider returned a wrong answer and are worth alerting on
 
 The `method` label is the JSON-RPC method (or TRON API path) only once a provider has answered it successfully; until then, and for names no provider recognizes, it is `other`. This stops clients from creating unbounded time series by sending made-up method names.
 
 Enable metrics with configuration option `metrics_port: 127.0.0.1:9090`
+
+The block heights show what the [block-lag check](#configuration-options) acts on. For example:
+
+```promql
+# Each provider's height, side by side
+haprovider_provider_block_height
+
+# How far each provider trails the median of its endpoint's providers, which
+# block_lag_tolerance is compared with once 3 or more report (Prometheus
+# averages the two middle heights where haprovider takes one of them)
+quantile by (endpoint) (0.5, haprovider_provider_block_height)
+  - on (endpoint) group_right haprovider_provider_block_height
+
+# A provider that stopped advancing (what stall_timeout catches)
+changes(haprovider_provider_block_height[5m]) == 0
+```
 
 ## Contributing
 

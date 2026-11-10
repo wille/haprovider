@@ -264,6 +264,7 @@ func (p *Provider) RecordHeight(height uint64, now time.Time) (prev HeightReport
 	}
 	p.height = HeightReport{Height: height, At: now}
 	p.reporting = true
+	metrics.SetProviderBlockHeight(p.Endpoint.Name, p.Name, height)
 
 	return prev, p.lastAdvance
 }
@@ -276,6 +277,7 @@ func (p *Provider) StopReporting() {
 	p.m.Lock()
 	defer p.m.Unlock()
 	p.reporting = false
+	metrics.ClearProviderBlockHeight(p.Endpoint.Name, p.Name)
 }
 
 // Height returns the provider's latest height report, and whether it still
