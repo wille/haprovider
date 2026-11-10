@@ -716,3 +716,81 @@ func TestHTTPAPI_RedirectFailsOver(t *testing.T) {
 	assert.Equal(t, "b", w.Header().Get("X-Provider"))
 	assert.False(t, providers[0].IsOnline())
 }
+
+// TestResponseIDMismatch_FailsOver: an answer with an id the client didn't
+// send is someone else's answer. The request fails over and the provider that
+// crossed wires is marked unhealthy.
+func TestResponseIDMismatch_FailsOver(t *testing.T) {
+	endpoint, a, b := rawThenMockEndpoint(t,
+		`{"jsonrpc":"2.0","id":999,"result":"0xdead"}`,
+		map[string]any{"eth_protocolVersion": "0x41"},
+	)
+
+	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_protocolVersion","params":[]}`)
+
+	res, err := rpc.DecodeResponse(w.Body.Bytes())
+	if assert.NoError(t, err) {
+		assert.JSONEq(t, `"0x41"`, string(res.Result))
+	}
+	assert.Equal(t, "b", w.Header().Get("X-Provider"))
+	assert.False(t, a.IsOnline(), "the provider that crossed wires is marked unhealthy")
+	assert.True(t, b.IsOnline())
+}
+
+// TestResponseIDMismatch_Coalesced: a coalesced response gets the client's own
+// id written over the provider's, so the provider's id is checked before that
+// can hide a crossed wire.
+func TestResponseIDMismatch_Coalesced(t *testing.T) {
+	endpoint, a, _ := rawThenMockEndpoint(t,
+		`{"jsonrpc":"2.0","id":999,"result":"0xde0b6b3a7640000"}`,
+		map[string]any{"eth_getBalance": "0x0"},
+	)
+
+	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xabc","latest"]}`)
+
+	res, err := rpc.DecodeResponse(w.Body.Bytes())
+	if assert.NoError(t, err) {
+		assert.JSONEq(t, `"0x0"`, string(res.Result), "the balance comes from the provider that answered this request")
+		assert.Equal(t, "1", res.GetID())
+	}
+	assert.False(t, a.IsOnline())
+}
+
+// TestResponseIDMismatch_Batch: a batch answer that answers one request twice
+// (and so another not at all) fails over.
+func TestResponseIDMismatch_Batch(t *testing.T) {
+	endpoint, a, _ := rawThenMockEndpoint(t,
+		`[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":1,"result":"0x1"}]`,
+		map[string]any{"eth_protocolVersion": "0x41", "net_version": "1"},
+	)
+
+	w := doRPC(endpoint, `[
+		{"jsonrpc":"2.0","id":1,"method":"eth_protocolVersion","params":[]},
+		{"jsonrpc":"2.0","id":2,"method":"net_version","params":[]}
+	]`)
+
+	res, err := rpc.DecodeBatchResponse(w.Body.Bytes())
+	if assert.NoError(t, err) && assert.Len(t, res.Responses, 2) {
+		assert.JSONEq(t, `"0x41"`, string(res.GetResponseByID("1").Result))
+		assert.JSONEq(t, `"1"`, string(res.GetResponseByID("2").Result))
+	}
+	assert.False(t, a.IsOnline())
+}
+
+// TestResponseIDNullError_Accepted: JSON-RPC lets an error answer have a null
+// id when the server couldn't read the request's. That's still the provider's
+// answer to this request; it isn't treated as a crossed wire, so a client
+// can't take providers out of rotation with a request they can't parse.
+func TestResponseIDNullError_Accepted(t *testing.T) {
+	endpoint, a, b := rawThenMockEndpoint(t,
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32602,"message":"invalid params"}}`,
+		map[string]any{"eth_protocolVersion": "0x41"},
+	)
+
+	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_protocolVersion","params":[]}`)
+
+	assertRPCError(t, w, -32602)
+	assert.Equal(t, "a", w.Header().Get("X-Provider"))
+	assert.True(t, a.IsOnline())
+	assert.True(t, b.IsOnline())
+}
