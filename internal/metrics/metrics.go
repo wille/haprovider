@@ -62,6 +62,19 @@ var (
 		[]string{"endpoint", "provider"},
 	)
 
+	// The block height each provider last reported in a healthcheck that got
+	// past its chain checks, including one then judged behind, ahead or
+	// stalled. No series while the provider isn't reporting (unreachable,
+	// syncing, on the wrong chain), so a graph shows a gap rather than a stale
+	// height.
+	providerBlockHeight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "haprovider_provider_block_height",
+			Help: "The block height (for Solana, the block height rather than the slot) the provider last reported in a healthcheck. Absent while the provider isn't reporting (unreachable, syncing, on the wrong chain).",
+		},
+		[]string{"endpoint", "provider"},
+	)
+
 	// Request duration metrics
 	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -125,6 +138,7 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(totalConnections)
 	prometheus.MustRegister(providerHealth)
 	prometheus.MustRegister(providerUptime)
+	prometheus.MustRegister(providerBlockHeight)
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
 	prometheus.MustRegister(coalescedRequests)
@@ -184,4 +198,15 @@ func RecordProviderHealth(endpoint, provider string, online bool) {
 // in seconds, or 0 when it's offline.
 func SetProviderUptime(endpoint, provider string, seconds float64) {
 	providerUptime.WithLabelValues(endpoint, provider).Set(seconds)
+}
+
+// SetProviderBlockHeight records the block height a provider reported.
+func SetProviderBlockHeight(endpoint, provider string, height uint64) {
+	providerBlockHeight.WithLabelValues(endpoint, provider).Set(float64(height))
+}
+
+// ClearProviderBlockHeight removes a provider's block height while it isn't
+// reporting one.
+func ClearProviderBlockHeight(endpoint, provider string) {
+	providerBlockHeight.DeleteLabelValues(endpoint, provider)
 }
