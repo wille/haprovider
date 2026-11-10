@@ -39,6 +39,7 @@ func TestLoadConfig_ExpandsProviderURLs(t *testing.T) {
 	config, err := loadConfig(t, `
 endpoints:
   eth:
+    chainId: "1"
     providers:
       - name: quicknode
         http: https://x.quiknode.pro/${QUICKNODE_TOKEN}/
@@ -76,6 +77,7 @@ func TestLoadConfig_ValidatesExpandedURL(t *testing.T) {
 endpoints:
   tron:
     kind: tron
+    chainId: mainnet
     providers:
       - http: ${TRON_URL}
 `)
@@ -125,7 +127,7 @@ func TestLoadConfig_MissingURLVariable(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := loadConfig(t, "endpoints:\n  eth:\n    providers:"+c.provider+"\n")
+			_, err := loadConfig(t, "endpoints:\n  eth:\n    chainId: \"1\"\n    providers:"+c.provider+"\n")
 			if err == nil {
 				t.Fatal("LoadConfig succeeded, want an error for the missing variable")
 			}
@@ -150,6 +152,7 @@ func TestLoadConfig_ExpandedURLRedacted(t *testing.T) {
 	config, err := loadConfig(t, `
 endpoints:
   eth:
+    chainId: "1"
     providers:
       - http: https://x.quiknode.pro/${QUICKNODE_TOKEN}/
         ws: wss://x.quiknode.pro/${QUICKNODE_TOKEN}/
@@ -182,14 +185,17 @@ func TestLoadConfig_StallTimeout(t *testing.T) {
 	config, err := loadConfig(t, `
 endpoints:
   eth:
+    chainId: "1"
     stall_timeout: 90s
     providers:
       - http: https://example.com
   base:
+    chainId: "8453"
     stall_timeout: 0s
     providers:
       - http: https://example.com
   polygon:
+    chainId: "137"
     providers:
       - http: https://example.com
 `)
@@ -205,5 +211,51 @@ endpoints:
 	}
 	if got := config.Endpoints["polygon"].StallTimeout; got != nil {
 		t.Errorf("polygon stall_timeout = %v, want unset", *got)
+	}
+}
+
+// TestLoadConfig_UnknownKey: a misspelled setting is an error, rather than
+// silently ignored (which for "chainID" used to mean trusting whichever
+// provider answered first).
+func TestLoadConfig_UnknownKey(t *testing.T) {
+	for _, yml := range []string{
+		"endpoints:\n  eth:\n    chainID: \"1\"\n    providers:\n      - http: https://example.com\n",
+		"endpoints:\n  eth:\n    chainId: \"1\"\n    block_lag_tolerence: 5\n    providers:\n      - http: https://example.com\n",
+		"endpoints:\n  eth:\n    chainId: \"1\"\n    providers:\n      - http: https://example.com\n        timout: 5s\n",
+		"logLevel: debug\nendpoints:\n  eth:\n    chainId: \"1\"\n    providers:\n      - http: https://example.com\n",
+		"endpoints:\n  eth:\n    chainId: \"1\"\n    chainId: \"5\"\n    providers:\n      - http: https://example.com\n",
+	} {
+		if _, err := loadConfig(t, yml); err == nil {
+			t.Errorf("LoadConfig succeeded, want an error for:\n%s", yml)
+		}
+	}
+}
+
+func TestLoadConfig_ChainIDRequired(t *testing.T) {
+	for _, kind := range []string{"eth", "solana", "tron", "btc"} {
+		_, err := loadConfig(t, "endpoints:\n  e:\n    kind: "+kind+"\n    providers:\n      - http: https://example.com/jsonrpc\n")
+		if err == nil || !strings.Contains(err.Error(), "endpoint e: chainId is required") {
+			t.Errorf("%s: LoadConfig error = %v, want chainId is required", kind, err)
+		}
+	}
+}
+
+// TestLoadConfig_TronJSONRPCSuffix: the check that tron provider URLs point at
+// the JSON-RPC API runs with a chainId set too (it used to be skipped).
+func TestLoadConfig_TronJSONRPCSuffix(t *testing.T) {
+	_, err := loadConfig(t, "endpoints:\n  tron:\n    kind: tron\n    chainId: mainnet\n    providers:\n      - http: https://api.trongrid.io\n")
+	if err == nil || !strings.Contains(err.Error(), "/jsonrpc") {
+		t.Errorf("LoadConfig error = %v, want the /jsonrpc suffix error", err)
+	}
+}
+
+// TestLoadConfig_Example: the example config shipped in the repository loads.
+func TestLoadConfig_Example(t *testing.T) {
+	b, err := os.ReadFile("../config.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(t, string(b)); err != nil {
+		t.Fatalf("config.example.yml: %v", err)
 	}
 }

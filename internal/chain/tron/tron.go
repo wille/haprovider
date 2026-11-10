@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/wille/haprovider/internal/chain/eth"
@@ -82,15 +83,12 @@ func (c *Chain) Healthcheck(ctx context.Context, p *core.Provider) (*core.NodeIn
 }
 
 func (c *Chain) ValidateConfig(e *core.Endpoint) error {
-	if e.ChainID != "" {
-		for v := range maps.Values(chainIds) {
-			if v == e.ChainID {
-				return nil
-			}
-		}
+	if e.ChainID != "" && !slices.Contains(slices.Collect(maps.Values(chainIds)), e.ChainID) {
 		return fmt.Errorf("invalid chainId: %s", e.ChainID)
 	}
 
+	// Checked whether or not a chainId is set: it used to be skipped when one
+	// was.
 	for _, p := range e.Providers {
 		if !strings.HasSuffix(p.Http, "/jsonrpc") {
 			return fmt.Errorf("provider %s http url must end with /jsonrpc and node must support the JSON-RPC API", p.Name)
