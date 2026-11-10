@@ -274,6 +274,17 @@ NextProvider:
 			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
 			continue NextProvider
 		}
+		// Every answer must belong to a request we sent, and answer it only once.
+		// A provider whose load balancer or cache crosses wires would otherwise
+		// hand the client the answer to someone else's request (e.g. another
+		// address's balance). This also runs before a coalesced response gets the
+		// client's own id written over the provider's, which would hide it.
+		if err := rpc.CheckResponseIDs(req, res); err != nil {
+			reqLog.Error("response id mismatch", "error", err)
+			provider.MarkUnhealthy(fmt.Errorf("response id mismatch: %w", err))
+			metrics.RecordFailedRequest(endpoint.Name, provider.Name, "http", "")
+			continue NextProvider
+		}
 		// Answer in the shape the client asked for, even if the provider wrapped a
 		// single response in an array.
 		res.IsBatch = req.IsBatch

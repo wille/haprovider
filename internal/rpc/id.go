@@ -60,6 +60,49 @@ func (id ID) String() string {
 	return string(id)
 }
 
+// IsNull reports whether the id is null or absent.
+func (id ID) IsNull() bool {
+	return len(id) == 0 || string(id) == "null"
+}
+
+// CheckResponseIDs returns an error if res can't be the answer to req: an
+// answer whose id belongs to none of the requests, or two answers with the
+// same id. Ids are compared by value (see String), so 1 and "1" match: some
+// gateways change an id's type, and that's no reason to reject the answer. An
+// error answer may have a null id, as JSON-RPC allows when the server couldn't
+// read the request's id (e.g. a parse error or a rate limit). When req itself
+// has a missing or repeated id, its answers can't be matched, so nothing is
+// checked. The caller has checked that req and res have the same length.
+func CheckResponseIDs(req *BatchRequest, res *BatchResponse) error {
+	want := make(map[string]bool, len(req.Requests))
+	for _, r := range req.Requests {
+		if r.ID.IsNull() || want[r.ID.String()] {
+			return nil
+		}
+		want[r.ID.String()] = true
+	}
+
+	seen := make(map[string]bool, len(res.Responses))
+	for _, r := range res.Responses {
+		if r.ID.IsNull() {
+			if r.IsError() {
+				continue
+			}
+			return fmt.Errorf("a result without an id")
+		}
+
+		id := r.ID.String()
+		if !want[id] {
+			return fmt.Errorf("an answer to id %s, which was not requested", FormatRawBody(string(r.ID)))
+		}
+		if seen[id] {
+			return fmt.Errorf("two answers to id %s", FormatRawBody(string(r.ID)))
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
 // StringID builds a string-valued id, used when we originate a request.
 func StringID(s string) ID {
 	if b, err := json.Marshal(s); err == nil {
