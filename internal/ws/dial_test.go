@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,4 +98,28 @@ func TestDialAnyProvider_ClientGoneDuringSuccessfulDial(t *testing.T) {
 		}
 		up.Close()
 	}
+}
+
+// TestDialProvider_RedirectNotFollowed: a provider that answers the WebSocket
+// handshake with a redirect fails the dial, and the host it names is never
+// contacted.
+func TestDialProvider_RedirectNotFollowed(t *testing.T) {
+	var hits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(target.Close)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, wsScheme(target.URL), http.StatusFound)
+	}))
+	t.Cleanup(up.Close)
+
+	p := &core.Provider{Name: "p", Ws: wsScheme(up.URL)}
+	ep := wsEndpoint(t, p)
+	proxy, cancel := newTestProxy(ep)
+	t.Cleanup(func() { cancel(nil) })
+
+	assert.Error(t, proxy.DialProvider(ep, p))
+	assert.Zero(t, hits.Load())
 }
