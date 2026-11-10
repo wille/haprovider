@@ -47,6 +47,7 @@ A WebSocket connection stays with the provider it was opened to. If that provide
 - **Request Validation**: Validates requests and responses to detect errors
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
 - **Request Coalescing**: Collapses identical concurrent read requests into a single upstream call and fans the response back to every client
+- **Response Verification**: Optionally cross-checks balances, contract reads and the chain height against a second provider, so one provider can't get a wrong answer through
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
 
@@ -68,6 +69,71 @@ allowlist of read-only, idempotent methods per chain; transaction submission,
 filters, subscriptions and other stateful calls are always sent individually.
 Batch requests are never coalesced. The `haprovider_coalesced_requests_total`
 metric tracks how many requests were served from a shared upstream call.
+
+### Response verification
+
+haprovider normally returns the first healthy provider's answer as-is. If you
+credit payments from what your providers report, one provider returning a wrong
+balance (a bug, a compromise, a man-in-the-middle) is enough to credit a payment
+that never happened. With `verify: true` on an endpoint, haprovider cross-checks
+the reads such decisions are made from against a second provider:
+
+| Chain | Cross-checked methods |
+|---|---|
+| `eth`, `tron` | `eth_getBalance`, `eth_call`, `eth_blockNumber` |
+| `solana` | `getBalance`, `getAccountInfo`, `getMultipleAccounts`, `getTokenAccountBalance`, `getBlockHeight`, `getSlot` |
+
+```yml
+endpoints:
+  eth_payments:
+    chainId: "1"
+    verify: true
+    providers:
+      - name: QuickNode
+        http: https://example.quiknode.pro/${QUICKNODE_TOKEN}/
+      - name: Infura
+        http: https://mainnet.infura.io/v3/${INFURA_KEY}
+```
+
+- **Balances and contract reads must agree.** The same value in a different
+  encoding (`0xa` and `0x0a`, letter case) agrees. For Solana only the `value`
+  is compared, since the context slot almost always differs.
+- **A disagreement is asked again once.** Providers a block apart disagree on a
+  value that changed in that block (e.g. a payment just arrived). After
+  `verify_retry_delay` (default `1s`) the same two are asked again; if they
+  agree now, the client gets that answer. If they still disagree, a third
+  provider settles it if the endpoint has one. Without a majority the client
+  gets a JSON-RPC error with code `-39201` ("providers disagree on the result")
+  instead of either answer, and can retry.
+- **Of two block heights, the lower is returned.** Providers a block apart are
+  both right; taking the lower one means a provider reporting a too-high height
+  can't inflate the confirmations a client counts from it.
+- **Best effort.** When no other provider answers (it's down, rate limited,
+  returns an error or a malformed result, or the endpoint has one provider), the
+  first answer is returned unverified, so losing a provider never disrupts
+  traffic. Watch `haprovider_verified_results_total{outcome="unverified"}`.
+- **Both providers are asked at the same time,** so a check takes as long as
+  the slower of the two, not both. A second opinion is waited for up to the
+  provider's `timeout`. Only when the first provider fails, or two disagree, are
+  providers asked again afterwards.
+- **Coalesced requests share one check.** Identical concurrent requests are
+  answered from a single upstream call (see [Request coalescing](#request-coalescing)),
+  and the check happens inside it, so they cost two upstream calls between them
+  and all get the same checked answer.
+- **Only what's needed is checked.** Error answers aren't compared (they credit
+  nothing), and in a batch only the listed methods are sent to the second
+  provider, so a transaction is never broadcast twice.
+- **Not at a block honest providers rarely agree on.** Reads at the `pending`
+  block (eth, tron) and account reads at `processed` commitment (Solana) aren't
+  cross-checked: each node's view of them is its own.
+- **HTTP only.** WebSocket connections are pinned to one provider and are not
+  cross-checked.
+
+Cross-checked methods cost twice the upstream requests, and a disagreement
+adds `verify_retry_delay` plus one more pair of requests. Enable it on the
+endpoints serving the reads that credit payments; on one that also serves
+reads of state that changes every block (prices, anything depending on the
+block time), honest providers a block apart disagree often.
 
 ## Installation
 
@@ -196,6 +262,8 @@ the config file. See [Environment variables](#environment-variables).
   - `keys`: Inbound API keys accepted for this endpoint, in addition to any global `keys` (optional). See [Authentication](#authentication).
   - `public`: If this endpoint is available to the public. A public endpoint will not include detailed error messages and headers (optional, default false). Note: `public` does **not** disable authentication — if keys apply to the endpoint, a valid token is still required.
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
+  - `verify`: Cross-check balances, contract reads and the chain height against a second provider (optional, default false). See [Response verification](#response-verification).
+  - `verify_retry_delay`: With `verify`, how long to wait before asking two disagreeing providers once more, e.g. `500ms` (optional, default `1s`; `0` asks only once)
   - `providers`: List of provider configurations
     - `name`: Provider identifier (optional, defaults to the `http` URL's host)
     - `http`: HTTP endpoint URL (required, expands `${ENV_VAR}`). Redirects are never followed: a provider that answers with one is treated as failing, so configure the final URL (e.g. `https://`, not an `http://` that redirects to it).
@@ -330,6 +398,7 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_total_connections`: Total WebSocket connections established
 - `haprovider_provider_health`: Provider health status (1=healthy, 0=unhealthy)
 - `haprovider_provider_uptime_seconds`: How long the provider has been continuously online, in seconds (0 if offline)
+- `haprovider_verified_results_total`: Results cross-checked against another provider on endpoints with `verify: true` (labels: endpoint, method, outcome). `outcome` is `agree`, `agree_after_retry` (they disagreed, then agreed when asked again: providers a block apart), `majority` (a third provider settled a disagreement), `disagree` (no majority; the client got an error) or `unverified` (no other provider answered). `majority` and `disagree` mean a provider returned a wrong answer and are worth alerting on
 
 The `method` label is the JSON-RPC method (or TRON API path) only once a provider has answered it successfully; until then, and for names no provider recognizes, it is `other`. This stops clients from creating unbounded time series by sending made-up method names.
 

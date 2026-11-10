@@ -208,6 +208,12 @@ func main() {
 
 	slog.Info("starting haprovider", "version", httpx.Version, "healthcheck_interval", parsedHealthcheckInterval.Round(time.Millisecond).String())
 
+	for _, endpoint := range config.Endpoints {
+		if endpoint.Verify && len(endpoint.Providers) < 2 {
+			endpoint.Logger().Warn("verify is enabled but the endpoint has a single provider, so results can't be cross-checked")
+		}
+	}
+
 	var wg sync.WaitGroup
 
 	total := 0

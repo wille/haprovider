@@ -2,14 +2,18 @@ package eth
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
+	"github.com/wille/haprovider/internal/verify"
 )
 
 const (
@@ -140,6 +144,101 @@ var coalesceable = map[string]struct{}{
 func Coalesceable(method string) bool {
 	_, ok := coalesceable[method]
 	return ok
+}
+
+func (c *Ethereum) Verifier(method string, params json.RawMessage) verify.Func {
+	return Verifier(method, params)
+}
+
+// verifiers are the EVM JSON-RPC methods cross-checked against a second
+// provider when an endpoint has verify enabled: the reads a payment processor
+// credits deposits from. Native balances, contract reads (ERC-20 balanceOf,
+// multicall), and the chain height that confirmations are counted from.
+var verifiers = map[string]verify.Func{
+	"eth_blockNumber": verify.Lowest(parseQuantity),
+	"eth_getBalance":  verify.Equal(quantity),
+	"eth_call":        verify.Equal(data),
+}
+
+// blockTagParam is the position of the block parameter of the cross-checked
+// methods that take one.
+var blockTagParam = map[string]int{
+	"eth_getBalance": 1,
+	"eth_call":       1,
+}
+
+// Verifier returns how to cross-check the result of an EVM JSON-RPC call, or
+// nil if it isn't cross-checked. Reads at the pending block are not: each node
+// builds its pending block from its own mempool, so honest providers rarely
+// agree on them. Exported so the Tron chain can reuse it.
+func Verifier(method string, params json.RawMessage) verify.Func {
+	v := verifiers[method]
+	if v == nil {
+		return nil
+	}
+	if pos, ok := blockTagParam[method]; ok && blockTag(params, pos) == "pending" {
+		return nil
+	}
+	return v
+}
+
+// blockTag returns the block tag string ("latest", "pending", ...) at
+// position pos of params, or "" if there is none there (an omitted block
+// defaults to latest; an EIP-1898 block object or a number names a block).
+func blockTag(params json.RawMessage, pos int) string {
+	var args []json.RawMessage
+	if err := json.Unmarshal(params, &args); err != nil || pos >= len(args) {
+		return ""
+	}
+	var tag string
+	if err := json.Unmarshal(args[pos], &tag); err != nil {
+		return ""
+	}
+	return tag
+}
+
+// parseQuantity reads a JSON hex quantity (e.g. "0x1a") as a uint64.
+func parseQuantity(raw json.RawMessage) (uint64, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return 0, err
+	}
+	return ParseHexNumber(s)
+}
+
+// quantity reads a JSON hex quantity of any size (e.g. a balance in wei) as a
+// decimal string, so "0x0a" and "0xa" compare equal.
+func quantity(raw json.RawMessage) (any, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	digits, ok := strings.CutPrefix(s, "0x")
+	if !ok || digits == "" {
+		return nil, fmt.Errorf("not a hex quantity: %q", s)
+	}
+	n, ok := new(big.Int).SetString(digits, 16)
+	if !ok {
+		return nil, fmt.Errorf("not a hex quantity: %q", s)
+	}
+	return n.String(), nil
+}
+
+// data reads JSON hex data (e.g. an eth_call return value) in lower case, so
+// results that differ only in letter case compare equal.
+func data(raw json.RawMessage) (any, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	digits, ok := strings.CutPrefix(s, "0x")
+	if !ok {
+		return nil, fmt.Errorf("not hex data: %q", s)
+	}
+	if _, err := hex.DecodeString(digits); err != nil {
+		return nil, fmt.Errorf("not hex data: %q", s)
+	}
+	return strings.ToLower(s), nil
 }
 
 func (c Ethereum) ValidateConfig(e *core.Endpoint) error {

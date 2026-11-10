@@ -90,7 +90,32 @@ var (
 		},
 		[]string{"endpoint", "method"},
 	)
+
+	// Results cross-checked against a second provider on endpoints with verify
+	// enabled. method is bounded by the chains' verified-method lists.
+	verifiedResults = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "haprovider_verified_results_total",
+			Help: "Results cross-checked against another provider, by outcome: agree, agree_after_retry (they disagreed, then agreed when asked again), majority (a third provider settled a disagreement), disagree (no majority; the client got an error) or unverified (no other provider answered)",
+		},
+		[]string{"endpoint", "method", "outcome"},
+	)
 )
+
+// Outcomes recorded by RecordVerifiedResult.
+const (
+	VerifyAgree           = "agree"
+	VerifyAgreeAfterRetry = "agree_after_retry"
+	VerifyMajority        = "majority"
+	VerifyDisagree        = "disagree"
+	VerifyUnverified      = "unverified"
+)
+
+// RecordVerifiedResult records the outcome of cross-checking a result against
+// another provider.
+func RecordVerifiedResult(endpoint, method, outcome string) {
+	verifiedResults.WithLabelValues(endpoint, method, outcome).Inc()
+}
 
 // MetricsHandler returns an HTTP handler for the Prometheus metrics endpoint
 func MetricsHandler() http.Handler {
@@ -103,6 +128,7 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(requestDuration)
 	prometheus.MustRegister(inflightRequests)
 	prometheus.MustRegister(coalescedRequests)
+	prometheus.MustRegister(verifiedResults)
 	return promhttp.Handler()
 }
 

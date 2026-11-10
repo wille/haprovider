@@ -2,6 +2,7 @@ package solana
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
+	"github.com/wille/haprovider/internal/verify"
 )
 
 var genesisHash = map[string]string{
@@ -69,6 +71,100 @@ var coalesceable = map[string]struct{}{
 func (c *Chain) Coalesceable(method string) bool {
 	_, ok := coalesceable[method]
 	return ok
+}
+
+// verifiers are the Solana methods cross-checked against a second provider
+// when an endpoint has verify enabled: the reads a payment processor credits
+// deposits from. SOL and token account balances, and the chain height
+// confirmations are counted from.
+var verifiers = map[string]verify.Func{
+	"getBlockHeight":         verify.Lowest(parseUint),
+	"getSlot":                verify.Lowest(parseUint),
+	"getBalance":             verify.Equal(contextValue),
+	"getAccountInfo":         verify.Equal(contextValue),
+	"getMultipleAccounts":    verify.Equal(contextValue),
+	"getTokenAccountBalance": verify.Equal(tokenAmount),
+}
+
+// heights are the cross-checked methods that return a height, which are
+// cross-checked at any commitment: the lower one is returned, so they never
+// disagree.
+var heights = map[string]bool{
+	"getBlockHeight": true,
+	"getSlot":        true,
+}
+
+// Verifier returns how to cross-check the result of a Solana call, or nil if
+// it isn't cross-checked. Account reads at processed commitment are not: each
+// node's view of blocks that haven't been voted on yet is its own (and may be
+// on a fork that gets dropped), so honest providers rarely agree on them.
+func (c *Chain) Verifier(method string, params json.RawMessage) verify.Func {
+	v := verifiers[method]
+	if v == nil {
+		return nil
+	}
+	if !heights[method] && commitment(params) == "processed" {
+		return nil
+	}
+	return v
+}
+
+// commitment returns the commitment level a call's config object asks for,
+// or "" if none (the node's default).
+func commitment(params json.RawMessage) string {
+	var args []json.RawMessage
+	if err := json.Unmarshal(params, &args); err != nil {
+		return ""
+	}
+	for _, arg := range args {
+		var config struct {
+			Commitment string `json:"commitment"`
+		}
+		if json.Unmarshal(arg, &config) == nil && config.Commitment != "" {
+			return config.Commitment
+		}
+	}
+	return ""
+}
+
+// parseUint reads a JSON number such as a block height or slot.
+func parseUint(raw json.RawMessage) (uint64, error) {
+	var n uint64
+	err := json.Unmarshal(raw, &n)
+	return n, err
+}
+
+// contextValue reads the value of an RpcResponse ({"context":{...},"value":...}).
+// The context is left out: its slot almost always differs between providers,
+// even when the value is the same.
+func contextValue(raw json.RawMessage) (any, error) {
+	var res map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, err
+	}
+	value, ok := res["value"]
+	if !ok {
+		return nil, fmt.Errorf("no value in result")
+	}
+	return verify.JSON(value)
+}
+
+// tokenAmount reads the raw amount of a getTokenAccountBalance result. Only
+// the integer amount is compared: uiAmount is a float whose formatting may
+// differ between node implementations.
+func tokenAmount(raw json.RawMessage) (any, error) {
+	var res struct {
+		Value *struct {
+			Amount *string `json:"amount"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, err
+	}
+	if res.Value == nil || res.Value.Amount == nil {
+		return nil, fmt.Errorf("no value.amount in result")
+	}
+	return *res.Value.Amount, nil
 }
 
 // AllowMethod allows all methods; Solana endpoints are not filtered.

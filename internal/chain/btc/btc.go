@@ -3,6 +3,7 @@ package btc
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
+	"github.com/wille/haprovider/internal/verify"
 )
 
 // genesisBlocks names the networks we know by their genesis block hash. A node
@@ -115,6 +117,11 @@ var allowed = map[string]struct{}{
 	// Rawtransactions: transaction lookup and broadcast
 	"getrawtransaction":  {},
 	"sendrawtransaction": {},
+}
+
+// Verifier returns nil: no Bitcoin RPC is cross-checked yet.
+func (c *Chain) Verifier(method string, params json.RawMessage) verify.Func {
+	return nil
 }
 
 // AllowMethod reports whether a client may call this Bitcoin RPC. Only the

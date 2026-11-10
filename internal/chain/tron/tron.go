@@ -2,6 +2,7 @@ package tron
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
+	"github.com/wille/haprovider/internal/verify"
 )
 
 var chainIds = map[uint64]string{
@@ -38,6 +40,12 @@ func (c *Chain) HandleError(code int, message string) error {
 // JSON-RPC surface, so the same stateful/non-idempotent methods are excluded.
 func (c *Chain) Coalesceable(method string) bool {
 	return eth.Coalesceable(method)
+}
+
+// Verifier delegates to the shared EVM policy, since Tron speaks the EVM
+// JSON-RPC surface. The native HTTP API passthrough is not cross-checked.
+func (c *Chain) Verifier(method string, params json.RawMessage) verify.Func {
+	return eth.Verifier(method, params)
 }
 
 // AllowMethod allows all methods; Tron endpoints are not filtered.
