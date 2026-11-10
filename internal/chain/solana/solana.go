@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
@@ -18,17 +20,30 @@ var genesisHash = map[string]string{
 
 type Chain struct{}
 
+// ValidateConfig accepts a known network name, or the genesis hash of a
+// network without one (e.g. a local test validator).
 func (c *Chain) ValidateConfig(e *core.Endpoint) error {
-	if e.ChainID != "" {
-		for v := range maps.Values(genesisHash) {
-			if v == e.ChainID {
-				return nil
-			}
-		}
-		return fmt.Errorf("invalid chainId: %s", e.ChainID)
+	if e.ChainID == "" || isGenesisHash(e.ChainID) || slices.Contains(slices.Collect(maps.Values(genesisHash)), e.ChainID) {
+		return nil
 	}
+	return fmt.Errorf("invalid chainId: %s (want mainnet, devnet, testnet, or a genesis hash)", e.ChainID)
+}
 
-	return nil
+// base58Alphabet is the alphabet Solana encodes hashes and keys in.
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// isGenesisHash reports whether s looks like a base58-encoded 32-byte hash,
+// which takes 32 to 44 characters.
+func isGenesisHash(s string) bool {
+	if len(s) < 32 || len(s) > 44 {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune(base58Alphabet, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // coalesceable is the allowlist of Solana JSON-RPC methods that are safe to
@@ -159,12 +174,22 @@ func getClientVersion(res *rpc.Response) (string, error) {
 }
 
 // getGenesisHash returns the genesis hash string, which we map to a network name.
+//
+// A network we don't know by name is identified by the hash itself, so a node
+// of an unknown network never passes for one we do (or for an endpoint without
+// a chainId).
 func getChainId(res *rpc.Response) (string, error) {
 	hash, err := rpc.DecodeResult[string](res)
 	if err != nil {
 		return "", fmt.Errorf("getGenesisHash failed: %w", err)
 	}
-	return genesisHash[*hash], nil
+	if name, ok := genesisHash[*hash]; ok {
+		return name, nil
+	}
+	if !isGenesisHash(*hash) {
+		return "", fmt.Errorf("invalid genesis hash: %q", *hash)
+	}
+	return *hash, nil
 }
 
 // getBlockHeight returns a JSON number; DecodeResult[uint64] decodes it directly

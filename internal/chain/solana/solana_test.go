@@ -102,3 +102,55 @@ func TestHandleError(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthcheckNetworks: a known genesis hash is named, and a network
+// without a name is identified by its genesis hash rather than passing for any
+// network.
+func TestHealthcheckNetworks(t *testing.T) {
+	const localValidator = "4sGjMW1sUnHzSxGspuhpqLDx6wiyjNtZAMdL4VZHirAn"
+	for genesis, want := range map[string]string{
+		"EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG": "devnet",
+		localValidator: localValidator,
+	} {
+		methods := healthyMethods()
+		methods["getGenesisHash"] = genesis
+		srv := rpctest.NewServer(methods, nil)
+		info, err := (&Chain{}).Healthcheck(context.Background(), newProvider(srv.URL))
+		srv.Close()
+		if err != nil {
+			t.Errorf("%s: Healthcheck: %v", want, err)
+			continue
+		}
+		if info.ChainID != want {
+			t.Errorf("ChainID = %q, want %q", info.ChainID, want)
+		}
+	}
+}
+
+func TestHealthcheckInvalidGenesis(t *testing.T) {
+	methods := healthyMethods()
+	methods["getGenesisHash"] = "not a hash!"
+	srv := rpctest.NewServer(methods, nil)
+	defer srv.Close()
+
+	if _, err := (&Chain{}).Healthcheck(context.Background(), newProvider(srv.URL)); err == nil {
+		t.Fatal("Healthcheck = nil; want an error for an invalid genesis hash")
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	for chainID, ok := range map[string]bool{
+		"mainnet": true,
+		"devnet":  true,
+		"testnet": true,
+		"4sGjMW1sUnHzSxGspuhpqLDx6wiyjNtZAMdL4VZHirAn": true,
+		"localnet":                         false,
+		"mainnet-beta":                     false,
+		"0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl": false, // not base58
+	} {
+		err := (&Chain{}).ValidateConfig(&core.Endpoint{Name: "solana", Kind: core.KindSolana, ChainID: chainID})
+		if ok != (err == nil) {
+			t.Errorf("ValidateConfig(%q) = %v, want ok=%v", chainID, err, ok)
+		}
+	}
+}

@@ -141,7 +141,7 @@ const provider = new ethers.WebSocketProvider('ws://localhost:8080/eth');
 
 ## Configuration
 
-The configuration file supports the following options:
+The configuration file supports the following options. Unknown or repeated keys are an error, so a misspelled setting stops haprovider at startup instead of being silently ignored.
 
 ```yml
 # Global settings
@@ -164,6 +164,7 @@ endpoints:
         ws: wss://mainnet.infura.io/ws/v3/${INFURA_KEY}
   solana:
     kind: solana
+    chainId: mainnet
     providers:
       - name: quicknode
         http: https://solana-mainnet.quicknode.pro/${QUICKNODE_TOKEN}
@@ -184,7 +185,11 @@ the config file. See [Environment variables](#environment-variables).
 - `keys`: Global inbound API keys accepted on every endpoint (optional). See [Authentication](#authentication).
 - `endpoints`: Map of endpoint configurations
   - `kind`: Chain type (eth, solana, tron, btc) (default: eth). Bitcoin (`btc`) endpoints only pass through blockchain-query RPCs (block/chain/mempool/txout reads plus `getrawtransaction`/`sendrawtransaction`); wallet, mining, and node-control commands are rejected. Tron does not yet support the solidity (solidity-node) API. The native TRON HTTP API passthrough (`/<endpoint>/wallet/...`) only forwards `GET`/`POST` requests under `wallet/`, `walletsolidity/` and `walletpbft/`; other paths return 404.
-  - `chainId`: Network chain ID (optional, EVM chains)
+  - `chainId`: The network the endpoint serves (required). Every provider must report it, or it's taken out of rotation:
+    - `eth`: the decimal EIP-155 chain id, e.g. `"1"` for Ethereum mainnet or `"8453"` for Base
+    - `solana`: `mainnet`, `devnet`, `testnet`, or the genesis hash of another network (e.g. a local test validator)
+    - `tron`: `mainnet`, `nile` or `shasta`
+    - `btc`: `mainnet`, `testnet3`, `testnet4`, `signet`, or the genesis block hash of another network (e.g. regtest), in lower case. A `mainnet` provider must also have Bitcoin's block at height 840000, which tells it apart from forks that share Bitcoin's genesis block (Bitcoin Cash, SV, Gold).
   - `block_lag_tolerance`: How many blocks a provider may trail, or lead, the median block height of the endpoint's providers before it's considered unhealthy (optional, per-chain default: 50 for eth and solana, 10 for tron, 0 for btc; leading is allowed at least 3 blocks). Only applies when at least 3 providers report a height: with two, nothing tells the one lagging behind from the one lying ahead, so neither is judged by the other's height. One provider reporting a wrong height can't push the others out of rotation.
   - `stall_timeout`: How long a provider's block height may stay unchanged while another provider reports a higher one before it's considered stalled, e.g. `90s` (optional, per-chain default: 2m, or 2h for btc; `0` disables). Works with any number of providers. A chain that has halted takes no provider out.
   - `max_response_size`: Max upstream response size in bytes (optional, default 100MB, 0 = unlimited)
@@ -209,6 +214,7 @@ the config file. See [Environment variables](#environment-variables).
 ```yml
 endpoints:
   eth:
+    chainId: "1"
     providers:
       - name: quicknode
         http: https://example.quiknode.pro/${QUICKNODE_TOKEN}/
@@ -304,6 +310,7 @@ endpoints:
 endpoints:
   solana:
     kind: solana
+    chainId: mainnet
     providers:
       - name: quicknode
         http: https://solana-mainnet.quicknode.pro/${QUICKNODE_TOKEN}

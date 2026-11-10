@@ -18,6 +18,11 @@ type RPCError struct {
 	Message string
 }
 
+// Handler, used as a method's mapped value, computes the method's result (or
+// an RPCError) from the request's params, for methods whose answer depends on
+// them (e.g. getblockhash at a given height).
+type Handler func(params json.RawMessage) any
+
 // NewServer returns a mock node backed by httptest.
 //
 // methods maps a JSON-RPC method name to the value placed in the response
@@ -64,6 +69,9 @@ func buildBatchResponse(methods map[string]any, batch *rpc.BatchRequest) *rpc.Ba
 		res := &rpc.Response{Version: "2.0", ID: req.ID}
 
 		result, ok := methods[req.Method]
+		if h, isHandler := result.(Handler); isHandler {
+			result = h(req.Params)
+		}
 		if !ok {
 			res.Error = rpc.NewError(-32601, "method not found: "+req.Method)
 		} else if e, isErr := result.(RPCError); isErr {

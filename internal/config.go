@@ -45,9 +45,12 @@ func LoadConfig(configFile string) *Config {
 
 	config := &Config{}
 
-	err := yaml.Unmarshal([]byte(configFromEnv), config)
+	// Strict: an unknown or repeated key is an error rather than silently
+	// ignored, so a typo (e.g. "chainID") can't quietly turn a setting, and the
+	// protection it gives, off.
+	err := yaml.UnmarshalStrict([]byte(configFromEnv), config)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("invalid config: %w", err))
 	}
 
 	// Expand env references in the global keys (e.g. "${HA_KEY}").
@@ -76,6 +79,12 @@ func LoadConfig(configFile string) *Config {
 		c := chain.New(endpoint.Kind)
 		if c == nil {
 			panic(fmt.Errorf("unknown chain kind: %s", endpoint.Kind))
+		}
+
+		// Without a configured chain id, whichever provider answered first at
+		// startup would decide which chain the endpoint serves.
+		if endpoint.ChainID == "" {
+			panic(fmt.Errorf("endpoint %s: chainId is required, e.g. %s", endpoint.Name, chainIDExample[endpoint.Kind]))
 		}
 
 		for i, provider := range endpoint.Providers {
@@ -127,11 +136,20 @@ func LoadConfig(configFile string) *Config {
 		// Validate after the provider URLs are expanded, so chain checks on the
 		// URL (e.g. tron's /jsonrpc suffix) see the real value.
 		if err := c.ValidateConfig(endpoint); err != nil {
-			panic(err)
+			panic(fmt.Errorf("endpoint %s: %w", endpoint.Name, err))
 		}
 	}
 
 	return config
+}
+
+// chainIDExample shows, per chain kind, what a chainId looks like, for the
+// error when one is missing.
+var chainIDExample = map[core.Kind]string{
+	core.KindEth:    `chainId: "1" (Ethereum mainnet; the decimal EIP-155 chain id)`,
+	core.KindSolana: `chainId: mainnet (or devnet, testnet, or a genesis hash)`,
+	core.KindTron:   `chainId: mainnet (or nile, shasta)`,
+	core.KindBTC:    `chainId: mainnet (or testnet3, testnet4, signet, or a genesis block hash)`,
 }
 
 // expandURL expands ${VAR} (and $VAR) references in a provider URL. Unlike the
