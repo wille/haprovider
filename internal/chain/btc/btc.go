@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/wille/haprovider/internal/broadcast"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
@@ -237,4 +238,10 @@ func (c *Chain) ValidateConfig(e *core.Endpoint) error {
 		return nil
 	}
 	return fmt.Errorf("invalid chainId: %s (want mainnet, testnet3, testnet4, signet, or a genesis block hash in lower case)", e.ChainID)
+}
+
+// Broadcaster returns nil: sendrawtransaction isn't broadcast to every
+// provider yet (its txid needs the witness data stripped first).
+func (c *Chain) Broadcaster(method string) *broadcast.Spec {
+	return nil
 }

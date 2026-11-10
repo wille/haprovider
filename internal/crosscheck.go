@@ -58,7 +58,7 @@ func forwardChecked(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batch
 
 	first := firstProvider(endpoint, req)
 	secondCh := goAsk(log, func() answers {
-		return askOthers(secondCtx, endpoint, req, checks, timing, log, first)
+		return askOthers(secondCtx, endpoint, req, checkIndices(checks), timing, log, first)
 	})
 
 	result, err := forwardWithFailover(ctx, endpoint, req, timing, log)
@@ -74,7 +74,7 @@ func forwardChecked(ctx context.Context, endpoint *core.Endpoint, req *rpc.Batch
 	// The first provider failed and the request was served by the one asked
 	// for the second opinion, which therefore isn't one: ask another.
 	if second.provider != nil && second.provider == result.provider {
-		second = askOthers(ctx, endpoint, req, checks, timing, log, result.provider)
+		second = askOthers(ctx, endpoint, req, checkIndices(checks), timing, log, result.provider)
 	}
 
 	return crossCheck(ctx, endpoint, req, result, checks, second, timing, log), nil
@@ -206,10 +206,10 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 	// usually caught up with each other by now.
 	if delay := endpoint.GetVerifyRetryDelay(); len(disputed) > 0 && delay > 0 && sleep(ctx, delay) {
 		againFirst := goAsk(log, func() answers {
-			return askProvider(ctx, endpoint, req, disputed, timing, log, result.provider)
+			return askProvider(ctx, endpoint, req, checkIndices(disputed), timing, log, result.provider)
 		})
 		againSecond := goAsk(log, func() answers {
-			return askProvider(ctx, endpoint, req, disputed, timing, log, second.provider)
+			return askProvider(ctx, endpoint, req, checkIndices(disputed), timing, log, second.provider)
 		})
 		a, b := <-againFirst, <-againSecond
 
@@ -242,7 +242,7 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 
 	var third answers
 	if len(disputed) > 0 {
-		third = askOthers(ctx, endpoint, req, disputed, timing, log, result.provider, second.provider)
+		third = askOthers(ctx, endpoint, req, checkIndices(disputed), timing, log, result.provider, second.provider)
 	}
 
 	for _, ch := range disputed {
@@ -298,15 +298,12 @@ func methodAttr(req *rpc.BatchRequest, method string) []any {
 	return nil
 }
 
-// askOthers sends the checked requests of req to the endpoint's providers
-// other than skip, failing over as usual, and returns their answers. Only the
-// checked requests are sent, so e.g. a transaction in the same batch is never
-// broadcast twice.
-func askOthers(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, checks []check, timing *servertiming.Header, log *slog.Logger, skip ...*core.Provider) answers {
-	sub := &rpc.BatchRequest{IsBatch: len(checks) > 1}
-	for _, ch := range checks {
-		sub.Requests = append(sub.Requests, req.Requests[ch.index])
-	}
+// askOthers sends the requests of req at indices to the endpoint's providers
+// other than skip, failing over as usual, and returns their answers. Only
+// those requests are sent, so e.g. a transaction in the same batch as a
+// cross-checked read is never sent twice.
+func askOthers(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, indices []int, timing *servertiming.Header, log *slog.Logger, skip ...*core.Provider) answers {
+	sub := subBatch(req, indices)
 
 	r, err := forwardWithFailover(ctx, endpoint, sub, timing, log, skip...)
 	if err != nil {
@@ -314,23 +311,42 @@ func askOthers(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchReque
 	}
 
 	at := responseIndex(sub, r.res)
-	byIndex := make(map[int]*rpc.Response, len(checks))
-	for k, ch := range checks {
-		byIndex[ch.index] = r.res.Responses[at[k]]
+	byIndex := make(map[int]*rpc.Response, len(indices))
+	for k, i := range indices {
+		byIndex[i] = r.res.Responses[at[k]]
 	}
 	return answers{byIndex: byIndex, provider: r.provider}
 }
 
-// askProvider sends the checked requests of req to p alone, without failing
-// over to any other provider.
-func askProvider(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, checks []check, timing *servertiming.Header, log *slog.Logger, p *core.Provider) answers {
+// askProvider sends the requests of req at indices to p alone, without
+// failing over to any other provider.
+func askProvider(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, indices []int, timing *servertiming.Header, log *slog.Logger, p *core.Provider) answers {
 	var skip []*core.Provider
 	for _, q := range endpoint.Providers {
 		if q != p {
 			skip = append(skip, q)
 		}
 	}
-	return askOthers(ctx, endpoint, req, checks, timing, log, skip...)
+	return askOthers(ctx, endpoint, req, indices, timing, log, skip...)
+}
+
+// subBatch returns the requests of req at indices, as a batch of their own (a
+// single request when there's one).
+func subBatch(req *rpc.BatchRequest, indices []int) *rpc.BatchRequest {
+	sub := &rpc.BatchRequest{IsBatch: len(indices) > 1}
+	for _, i := range indices {
+		sub.Requests = append(sub.Requests, req.Requests[i])
+	}
+	return sub
+}
+
+// checkIndices returns the request indices of checks.
+func checkIndices(checks []check) []int {
+	indices := make([]int, len(checks))
+	for k, ch := range checks {
+		indices[k] = ch.index
+	}
+	return indices
 }
 
 // sleep waits for d and reports whether it did, rather than ctx being done

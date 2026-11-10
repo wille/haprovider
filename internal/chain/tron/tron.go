@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/wille/haprovider/internal/broadcast"
 	"github.com/wille/haprovider/internal/chain/eth"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
@@ -149,4 +150,10 @@ func getBlockHeight(res *rpc.Response) (uint64, error) {
 		return 0, fmt.Errorf("failed to parse block height: %v (%s)", err, *height)
 	}
 	return n, nil
+}
+
+// Broadcaster returns nil: TRON's JSON-RPC API doesn't submit transactions
+// (they go through the native /wallet/broadcasttransaction API).
+func (c *Chain) Broadcaster(method string) *broadcast.Spec {
+	return nil
 }

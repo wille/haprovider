@@ -115,6 +115,32 @@ var (
 	)
 )
 
+// Each provider's answer to a transaction broadcast to every provider, on
+// endpoints with broadcast enabled. method is bounded by the chains'
+// transaction-submitting methods.
+var broadcastResults = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "haprovider_broadcast_results_total",
+		Help: "Providers' answers to transactions broadcast to every provider, by outcome: accepted, already_known (it already had the transaction), rejected (an error, e.g. insufficient funds), failed (no answer) or wrong_hash (it answered with another transaction's hash)",
+	},
+	[]string{"endpoint", "provider", "method", "outcome"},
+)
+
+// Outcomes recorded by RecordBroadcastResult.
+const (
+	BroadcastAccepted     = "accepted"
+	BroadcastAlreadyKnown = "already_known"
+	BroadcastRejected     = "rejected"
+	BroadcastFailed       = "failed"
+	BroadcastWrongHash    = "wrong_hash"
+)
+
+// RecordBroadcastResult records one provider's answer to a broadcast
+// transaction.
+func RecordBroadcastResult(endpoint, provider, method, outcome string) {
+	broadcastResults.WithLabelValues(endpoint, provider, method, outcome).Inc()
+}
+
 // Outcomes recorded by RecordVerifiedResult.
 const (
 	VerifyAgree           = "agree"
@@ -143,6 +169,7 @@ func MetricsHandler() http.Handler {
 	prometheus.MustRegister(inflightRequests)
 	prometheus.MustRegister(coalescedRequests)
 	prometheus.MustRegister(verifiedResults)
+	prometheus.MustRegister(broadcastResults)
 	return promhttp.Handler()
 }
 

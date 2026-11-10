@@ -100,7 +100,9 @@ func IncomingHttpRpcHandler(ctx context.Context, endpoint *core.Endpoint, w http
 		return
 	}
 
-	result, err := forwardChecked(ctx, endpoint, req, timing, log)
+	// Transactions are never coalesced, so they're broadcast (on endpoints with
+	// broadcast enabled) on this path only.
+	result, err := forwardTransactions(ctx, endpoint, req, timing, log)
 	if err != nil {
 		writeForwardError(w, err, log)
 		return
