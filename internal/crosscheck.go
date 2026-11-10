@@ -163,9 +163,18 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 			continue
 		}
 
-		if other == nil || other.IsError() {
+		if other == nil {
 			metrics.RecordVerifiedResult(endpoint.Name, method, metrics.VerifyUnverified)
-			log.Debug("result not verified: no other provider answered", "method", method)
+			log.Debug("result not verified: no other provider answered", methodAttr(req, method)...)
+			warnUnverified(endpoint, result.provider, log, "no other provider answered", methodAttr(req, method)...)
+			continue
+		}
+		if other.IsError() {
+			metrics.RecordVerifiedResult(endpoint.Name, method, metrics.VerifyUnverified)
+			_, err := other.GetError()
+			attrs := append(methodAttr(req, method), "provider", second.provider.Name, "error", err)
+			log.Debug("result not verified: other provider answered with an error", attrs...)
+			warnUnverified(endpoint, result.provider, log, "other provider answered with an error", attrs...)
 			continue
 		}
 
@@ -176,7 +185,9 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 			metrics.RecordVerifiedResult(endpoint.Name, method, metrics.VerifyAgree)
 		case verify.Inconclusive:
 			metrics.RecordVerifiedResult(endpoint.Name, method, metrics.VerifyUnverified)
-			log.Warn("result not verified: malformed result from other provider", "method", method, "provider", second.provider.Name, "result", rpc.FormatRawBody(string(other.Result)))
+			attrs := append(methodAttr(req, method), "provider", second.provider.Name, "result", rpc.FormatRawBody(string(other.Result)))
+			log.Debug("result not verified: malformed result from other provider", attrs...)
+			warnUnverified(endpoint, result.provider, log, "malformed result from other provider", attrs...)
 		case verify.Disagree:
 			disputed = append(disputed, ch)
 		}
@@ -218,7 +229,7 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 			case verify.Agree:
 				setResult(ch.index, value)
 				metrics.RecordVerifiedResult(endpoint.Name, method, metrics.VerifyAgreeAfterRetry)
-				log.Debug("providers agree after asking again", "method", method)
+				log.Debug("providers agree after asking again", methodAttr(req, method)...)
 				continue
 			case verify.Disagree:
 				// Settle it on the newer answers, closer in time to the third's.
@@ -238,12 +249,11 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 		method := req.Requests[ch.index].Method
 		first, other, tie := firsts[ch.index], others[ch.index], third.byIndex[ch.index]
 
-		attrs := []any{
-			"method", method,
+		attrs := append(methodAttr(req, method),
 			"params", rpc.FormatRawBody(string(req.Requests[ch.index].Params)),
 			result.provider.Name, rpc.FormatRawBody(string(first.Result)),
 			second.provider.Name, rpc.FormatRawBody(string(other.Result)),
-		}
+		)
 
 		if tie != nil && !tie.IsError() {
 			attrs = append(attrs, third.provider.Name, rpc.FormatRawBody(string(tie.Result)))
@@ -276,6 +286,16 @@ func crossCheck(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequ
 		provider: result.provider,
 		dur:      result.dur,
 	}
+}
+
+// methodAttr returns the method log attribute for a line about one request
+// of req: only for a batch, since a single request's logger already carries
+// its method (and a repeated key is a repeated key in JSON logs too).
+func methodAttr(req *rpc.BatchRequest, method string) []any {
+	if req.IsBatch {
+		return []any{"method", method}
+	}
+	return nil
 }
 
 // askOthers sends the checked requests of req to the endpoint's providers

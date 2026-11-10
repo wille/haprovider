@@ -112,6 +112,10 @@ endpoints:
   returns an error or a malformed result, or the endpoint has one provider), the
   first answer is returned unverified, so losing a provider never disrupts
   traffic. Watch `haprovider_verified_results_total{outcome="unverified"}`.
+  haprovider also logs a warning, `results not verified: <reason>`, at most once
+  a minute per endpoint (while a provider is down every checked read is one),
+  with how many there were since the last one, which provider answered, and how
+  many others are online.
 - **Both providers are asked at the same time,** so a check takes as long as
   the slower of the two, not both. A second opinion is waited for up to the
   provider's `timeout`. Only when the first provider fails, or two disagree, are
