@@ -161,7 +161,6 @@ endpoints:
 #   verify: true                   # cross-check balances, contract reads and chain
 #                                  # height against a second provider (best effort)
 #   verify_retry_delay: 1s         # wait before asking disagreeing providers again (0: don't)
-#   broadcast: true                # send transactions to every provider at once
 #   block_lag_tolerance: 50        # max blocks a provider may trail (or lead) the median
 #                                  # height of the providers (needs 3+ providers)
 #   stall_timeout: 2m              # how long a provider's height may stay unchanged

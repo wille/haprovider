@@ -280,17 +280,18 @@ func TestCrossCheck_UnlistedMethodNotChecked(t *testing.T) {
 }
 
 // TestCrossCheck_Batch: only the listed methods of a batch are sent to the
-// second provider, so e.g. a transaction is never broadcast twice, and a
-// disagreement only fails its own entry.
+// second provider, so a transaction in the batch goes to each provider once (by
+// the broadcast, not again by the cross-check), and a disagreement only fails
+// its own entry.
 func TestCrossCheck_Batch(t *testing.T) {
 	ep, us := verifyEndpoint(t,
-		map[string]any{"eth_getBalance": "0x1", "eth_sendRawTransaction": "0xhash", "eth_call": "0xAB"},
-		map[string]any{"eth_getBalance": "0x2", "eth_sendRawTransaction": "0xhash", "eth_call": "0xab"},
+		map[string]any{"eth_getBalance": "0x1", "eth_sendRawTransaction": txHash, "eth_call": "0xAB"},
+		map[string]any{"eth_getBalance": "0x2", "eth_sendRawTransaction": txHash, "eth_call": "0xab"},
 	)
 
 	w := doRPC(ep, `[
 		{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xabc","latest"]},
-		{"jsonrpc":"2.0","id":2,"method":"eth_sendRawTransaction","params":["0x00"]},
+		{"jsonrpc":"2.0","id":2,"method":"eth_sendRawTransaction","params":["`+rawTx+`"]},
 		{"jsonrpc":"2.0","id":3,"method":"eth_call","params":[{},"latest"]}
 	]`)
 
@@ -304,11 +305,12 @@ func TestCrossCheck_Batch(t *testing.T) {
 		code, _ := balanceRes.GetError()
 		assert.Equal(t, rpc.CodeProvidersDisagree, code)
 	}
-	assert.JSONEq(t, `"0xhash"`, string(res.GetResponseByID("2").Result))
+	assert.JSONEq(t, `"`+txHash+`"`, string(res.GetResponseByID("2").Result))
 	assert.JSONEq(t, `"0xAB"`, string(res.GetResponseByID("3").Result), "eth_call agrees, letter case aside")
 
 	// eth_getBalance twice: the disagreement is asked again before giving up.
-	assert.ElementsMatch(t, []string{"eth_getBalance", "eth_call", "eth_getBalance"}, us[1].Methods())
+	eventuallySent(t, us...)
+	assert.ElementsMatch(t, []string{"eth_getBalance", "eth_sendRawTransaction", "eth_call", "eth_getBalance"}, us[1].Methods())
 }
 
 // TestCrossCheck_Solana: Solana results agree on their value even though the

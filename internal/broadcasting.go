@@ -38,10 +38,9 @@ type providerAnswers struct {
 	byIndex map[int]*rpc.Response
 }
 
-// forwardTransactions forwards req like forwardChecked, except that on an
-// endpoint with broadcast enabled, the requests that submit a transaction
-// (eth_sendRawTransaction, Solana sendTransaction) go to every provider at
-// once (see broadcastTxs). The rest of a batch goes the usual way at the same
+// forwardTransactions forwards req like forwardChecked, except that the
+// requests that submit a transaction (eth_sendRawTransaction, Solana
+// sendTransaction) go to every provider at once (see broadcastTxs). The rest of a batch goes the usual way at the same
 // time.
 func forwardTransactions(ctx context.Context, endpoint *core.Endpoint, req *rpc.BatchRequest, timing *servertiming.Header, log *slog.Logger) (*forwardResult, error) {
 	txs := txsFor(endpoint, req)
@@ -114,12 +113,8 @@ func forwardTransactions(ctx context.Context, endpoint *core.Endpoint, req *rpc.
 	}, nil
 }
 
-// txsFor returns the requests of req that submit a transaction, when the
-// endpoint has broadcast enabled.
+// txsFor returns the requests of req that submit a transaction.
 func txsFor(endpoint *core.Endpoint, req *rpc.BatchRequest) []tx {
-	if !endpoint.Broadcast {
-		return nil
-	}
 	c := chain.New(endpoint.Kind)
 	if c == nil {
 		return nil

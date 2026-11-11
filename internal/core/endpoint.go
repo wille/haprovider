@@ -63,12 +63,6 @@ type Endpoint struct {
 	// no other provider answers, the result is sent unverified.
 	Verify bool `yaml:"verify,omitempty"`
 
-	// Broadcast sends transactions (eth_sendRawTransaction, Solana
-	// sendTransaction) to every provider at once on the HTTP path, instead of
-	// only the first, so one provider dropping a transaction can't hold it up.
-	// Opt-in: it would defeat a private or MEV-protected provider.
-	Broadcast bool `yaml:"broadcast,omitempty"`
-
 	// VerifyRetryDelay is how long to wait before asking two disagreeing
 	// providers once more, when verify is enabled. Honest providers a block
 	// apart disagree on a value that changed in that block, and have usually
