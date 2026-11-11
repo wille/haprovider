@@ -48,13 +48,13 @@ A WebSocket connection stays with the provider it was opened to. If that provide
 - **Rate Limit Handling**: Detects rate limits and retries once the provider is available again
 - **Request Coalescing**: Collapses identical concurrent read requests into a single upstream call and fans the response back to every client
 - **Response Verification**: Optionally cross-checks balances, contract reads and the chain height against a second provider, so one provider can't get a wrong answer through
+- **Transaction Broadcasting**: Optionally sends every transaction to all providers at once and checks the hash each answers with, so one provider dropping a transaction can't hold it up
 - **Connection Optimization**: Upstream keepalive/http2 connection pooling
 - **Health Checks**: Automatic health monitoring of all configured providers
 
 ### *What haprovider doesn't do right now*
 
 - Response caching
-- Transaction broadcasts to multiple nodes
 
 ### Request coalescing
 
@@ -138,6 +138,51 @@ adds `verify_retry_delay` plus one more pair of requests. Enable it on the
 endpoints serving the reads that credit payments; on one that also serves
 reads of state that changes every block (prices, anything depending on the
 block time), honest providers a block apart disagree often.
+
+### Transaction broadcasting
+
+haprovider normally sends a transaction to one provider, the first healthy one.
+If that provider accepts it but never broadcasts it (a bug, an overloaded
+mempool, a provider dropping it on purpose), the transaction never lands and the
+client waits on a hash that leads nowhere. With `broadcast: true` on an endpoint,
+transactions go to every healthy provider at once:
+
+| Chain | Broadcast method | Hash checked against |
+|---|---|---|
+| `eth` | `eth_sendRawTransaction` | keccak256 of the raw transaction |
+| `solana` | `sendTransaction` | its first signature (legacy and v0 transactions) |
+
+```yml
+endpoints:
+  eth:
+    chainId: "1"
+    broadcast: true
+    providers:
+      - name: own-node
+        http: http://geth:8545
+      - name: Infura
+        http: https://mainnet.infura.io/v3/${INFURA_KEY}
+```
+
+- **The first acceptance answers.** A provider accepts the transaction by
+  answering with its hash, or by saying it already has it ("already known",
+  "already processed": once one node has a transaction, that's the usual answer
+  from the others). The client gets the hash as soon as any provider accepts;
+  the others still get the transaction, in the background.
+- **The hash is checked.** haprovider computes each transaction's hash itself. A
+  provider answering with another one is lying or broken: its answer is never
+  used, and it's taken out of rotation. Solana transactions in a newer format
+  (v1) are still broadcast, but the answer is taken without checking it.
+- **A rejection comes from the first provider.** If no provider accepts the
+  transaction (e.g. insufficient funds, nonce too low), the client gets the error
+  of the first provider, in priority order, that rejected it. A rejection is
+  about the transaction, so it never takes a provider out of rotation.
+- **Only transactions are broadcast.** In a batch, the rest goes the usual way.
+  WebSocket connections are pinned to one provider and don't broadcast.
+- **Opt-in.** Broadcasting to public providers would defeat a private or
+  MEV-protected one, so it's off unless you enable it.
+
+Each transaction costs one request per provider.
 
 ## Installation
 
@@ -268,6 +313,7 @@ the config file. See [Environment variables](#environment-variables).
   - `add_xfwd_headers`: Add X-Forwarded-For to upstream requests (optional, default false)
   - `verify`: Cross-check balances, contract reads and the chain height against a second provider (optional, default false). See [Response verification](#response-verification).
   - `verify_retry_delay`: With `verify`, how long to wait before asking two disagreeing providers once more, e.g. `500ms` (optional, default `1s`; `0` asks only once)
+  - `broadcast`: Send transactions to every provider at once and check the hash each answers with (optional, default false). See [Transaction broadcasting](#transaction-broadcasting).
   - `providers`: List of provider configurations
     - `name`: Provider identifier (optional, defaults to the `http` URL's host)
     - `http`: HTTP endpoint URL (required, expands `${ENV_VAR}`). Redirects are never followed: a provider that answers with one is treated as failing, so configure the final URL (e.g. `https://`, not an `http://` that redirects to it).
@@ -404,6 +450,7 @@ haprovider exposes Prometheus metrics for monitoring:
 - `haprovider_provider_uptime_seconds`: How long the provider has been continuously online, in seconds (0 if offline)
 - `haprovider_provider_block_height`: The block height each provider last reported in a healthcheck (labels: endpoint, provider), including one judged behind, ahead or stalled. Absent while the provider isn't reporting one (unreachable, syncing, on the wrong chain)
 - `haprovider_verified_results_total`: Results cross-checked against another provider on endpoints with `verify: true` (labels: endpoint, method, outcome). `outcome` is `agree`, `agree_after_retry` (they disagreed, then agreed when asked again: providers a block apart), `majority` (a third provider settled a disagreement), `disagree` (no majority; the client got an error) or `unverified` (no other provider answered). `majority` and `disagree` mean a provider returned a wrong answer and are worth alerting on
+- `haprovider_broadcast_results_total`: Each provider's answer to a transaction broadcast on endpoints with `broadcast: true` (labels: endpoint, provider, method, outcome). `outcome` is `accepted`, `already_known`, `rejected` (an error, e.g. insufficient funds), `failed` (no answer) or `wrong_hash` (it answered with another transaction's hash, which is worth alerting on)
 
 The `method` label is the JSON-RPC method (or TRON API path) only once a provider has answered it successfully; until then, and for names no provider recognizes, it is `other`. This stops clients from creating unbounded time series by sending made-up method names.
 

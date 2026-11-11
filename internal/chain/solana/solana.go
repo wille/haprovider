@@ -2,12 +2,14 @@ package solana
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
 
+	"github.com/wille/haprovider/internal/broadcast"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
@@ -31,7 +33,7 @@ func (c *Chain) ValidateConfig(e *core.Endpoint) error {
 	return fmt.Errorf("invalid chainId: %s (want mainnet, devnet, testnet, or a genesis hash)", e.ChainID)
 }
 
-// base58Alphabet is the alphabet Solana encodes hashes and keys in.
+// base58Alphabet is the alphabet Solana encodes hashes, keys and signatures in.
 const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 // isGenesisHash reports whether s looks like a base58-encoded 32-byte hash,
@@ -308,4 +310,76 @@ func checkHealth(res *rpc.Response) error {
 		return fmt.Errorf("node is not healthy: %s", *status)
 	}
 	return nil
+}
+
+// sendTransaction broadcasts sendTransaction calls. A node that already has
+// the transaction fails its preflight with "This transaction has already been
+// processed" (AlreadyProcessed).
+var sendTransaction = &broadcast.Spec{
+	Hash:     transactionSignature,
+	SameHash: func(a, b string) bool { return a == b },
+	AlreadyKnown: func(message string) bool {
+		return broadcast.ContainsAny(message, "already been processed", "alreadyprocessed")
+	},
+}
+
+func (c *Chain) Broadcaster(method string) *broadcast.Spec {
+	if method == "sendTransaction" {
+		return sendTransaction
+	}
+	return nil
+}
+
+// transactionSignature returns the id of the transaction a sendTransaction
+// call submits: its first signature, in base58.
+//
+// Only legacy and v0 transactions are read. They start with the number of
+// signatures (a compact-u16, below 128 in any transaction that fits in a
+// packet) followed by the signatures, the first being the fee payer's. A
+// first byte with the high bit set is a newer format (v1 transactions start
+// with 0x81 and put their signatures at the end); those are not read, rather
+// than risk naming the wrong signature.
+func transactionSignature(params json.RawMessage) (string, error) {
+	var args []json.RawMessage
+	if err := json.Unmarshal(params, &args); err != nil || len(args) == 0 {
+		return "", fmt.Errorf("want an encoded transaction")
+	}
+
+	var encoded string
+	if err := json.Unmarshal(args[0], &encoded); err != nil {
+		return "", fmt.Errorf("encoded transaction is not a string")
+	}
+
+	// base58 is the default encoding.
+	encoding := "base58"
+	if len(args) > 1 {
+		var config struct {
+			Encoding string `json:"encoding"`
+		}
+		if json.Unmarshal(args[1], &config) == nil && config.Encoding != "" {
+			encoding = config.Encoding
+		}
+	}
+
+	var raw []byte
+	var err error
+	switch encoding {
+	case "base64":
+		raw, err = base64.StdEncoding.DecodeString(encoded)
+	case "base58":
+		raw, err = base58Decode(encoded)
+	default:
+		return "", fmt.Errorf("unknown transaction encoding %q", encoding)
+	}
+	if err != nil {
+		return "", fmt.Errorf("decode transaction: %w", err)
+	}
+
+	if len(raw) == 0 || raw[0]&0x80 != 0 {
+		return "", fmt.Errorf("not a legacy or v0 transaction")
+	}
+	if raw[0] == 0 || len(raw) < 1+64 {
+		return "", fmt.Errorf("transaction has no signature")
+	}
+	return base58Encode(raw[1:65]), nil
 }

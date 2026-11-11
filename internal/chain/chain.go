@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/wille/haprovider/internal/broadcast"
 	"github.com/wille/haprovider/internal/chain/btc"
 	"github.com/wille/haprovider/internal/chain/eth"
 	"github.com/wille/haprovider/internal/chain/solana"
@@ -57,6 +58,11 @@ type Chain interface {
 	// height) are listed, and not at a block or commitment level honest
 	// providers rarely agree on (e.g. eth's pending block).
 	Verifier(method string, params json.RawMessage) verify.Func
+
+	// Broadcaster returns how to broadcast calls to method to every provider
+	// when the endpoint has broadcast enabled, or nil when method doesn't
+	// submit a transaction.
+	Broadcaster(method string) *broadcast.Spec
 }
 
 var (

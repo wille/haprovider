@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wille/haprovider/internal/broadcast"
 	"github.com/wille/haprovider/internal/core"
 	"github.com/wille/haprovider/internal/httpx"
 	"github.com/wille/haprovider/internal/rpc"
 	"github.com/wille/haprovider/internal/verify"
+	"golang.org/x/crypto/sha3"
 )
 
 const (
@@ -385,4 +387,51 @@ func ParseHexNumber(hex string) (uint64, error) {
 	}
 
 	return i, nil
+}
+
+func (c *Ethereum) Broadcaster(method string) *broadcast.Spec {
+	return Broadcaster(method)
+}
+
+// sendRawTransaction broadcasts eth_sendRawTransaction calls. "Already known"
+// is how geth, reth and the providers built on them say it ("already known"),
+// as do Erigon ("ALREADY_EXISTS"), Nethermind ("AlreadyKnown") and Besu
+// ("Known transaction").
+var sendRawTransaction = &broadcast.Spec{
+	Hash:     rawTransactionHash,
+	SameHash: strings.EqualFold,
+	AlreadyKnown: func(message string) bool {
+		return broadcast.ContainsAny(message, "already known", "alreadyknown", "already_exists", "already exists", "known transaction", "already imported")
+	},
+}
+
+// Broadcaster returns how to broadcast an EVM JSON-RPC method to every
+// provider, or nil if it doesn't submit a transaction.
+func Broadcaster(method string) *broadcast.Spec {
+	if method == "eth_sendRawTransaction" {
+		return sendRawTransaction
+	}
+	return nil
+}
+
+// rawTransactionHash returns the hash of the signed transaction an
+// eth_sendRawTransaction call submits: the keccak256 of its raw bytes, which
+// holds for legacy and typed (EIP-2718) transactions alike.
+func rawTransactionHash(params json.RawMessage) (string, error) {
+	var args []string
+	if err := json.Unmarshal(params, &args); err != nil || len(args) != 1 {
+		return "", fmt.Errorf("want one raw transaction")
+	}
+	digits, ok := strings.CutPrefix(args[0], "0x")
+	if !ok {
+		return "", fmt.Errorf("raw transaction is not 0x-prefixed hex")
+	}
+	raw, err := hex.DecodeString(digits)
+	if err != nil || len(raw) == 0 {
+		return "", fmt.Errorf("raw transaction is not hex")
+	}
+
+	h := sha3.NewLegacyKeccak256()
+	h.Write(raw)
+	return "0x" + hex.EncodeToString(h.Sum(nil)), nil
 }
