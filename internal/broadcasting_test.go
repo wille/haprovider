@@ -31,10 +31,10 @@ var txHash = func() string {
 
 const sendRawTxReq = `{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + rawTx + `"]}`
 
-// broadcastEndpoint builds an eth endpoint with broadcast enabled and one
-// online provider per upstream, in priority order.
+// broadcastEndpoint builds an eth endpoint with one online provider per
+// upstream, in priority order.
 func broadcastEndpoint(upstreams ...*recordingUpstream) *core.Endpoint {
-	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth, Broadcast: true}
+	ep := &core.Endpoint{Name: "test", ChainID: "1", Kind: core.KindEth}
 	for i, u := range upstreams {
 		p := &core.Provider{Name: fmt.Sprintf("p%d", i), Http: u.URL, Endpoint: ep}
 		p.MarkHealthy(0)
@@ -67,18 +67,6 @@ func eventuallySent(t *testing.T, upstreams ...*recordingUpstream) {
 		assert.Eventually(t, func() bool { return sends(u, "eth_sendRawTransaction") == 1 }, 2*time.Second, 10*time.Millisecond,
 			"provider %d should be sent the transaction once", i)
 	}
-}
-
-func TestBroadcast_Off(t *testing.T) {
-	a := newRecordingUpstream(t, sendRaw(txHash))
-	b := newRecordingUpstream(t, sendRaw(txHash))
-	ep := broadcastEndpoint(a, b)
-	ep.Broadcast = false
-
-	assertResult(t, doRPC(ep, sendRawTxReq), `"`+txHash+`"`)
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 1, sends(a, "eth_sendRawTransaction"))
-	assert.Zero(t, sends(b, "eth_sendRawTransaction"), "without broadcast, only the first provider gets it")
 }
 
 func TestBroadcast_AllProviders(t *testing.T) {
@@ -195,10 +183,10 @@ func TestBroadcast_Batch(t *testing.T) {
 	assert.Zero(t, sends(b, "eth_blockNumber"), "only the transaction is broadcast")
 }
 
-// solanaBroadcastEndpoint builds a Solana endpoint with broadcast enabled whose
-// providers answer sendTransaction with answer.
+// solanaBroadcastEndpoint builds a Solana endpoint whose providers answer
+// sendTransaction with answer.
 func solanaBroadcastEndpoint(t *testing.T, answer any) (*core.Endpoint, []*recordingUpstream) {
-	ep := &core.Endpoint{Name: "test", ChainID: "mainnet", Kind: core.KindSolana, Broadcast: true}
+	ep := &core.Endpoint{Name: "test", ChainID: "mainnet", Kind: core.KindSolana}
 	var us []*recordingUpstream
 	for i := range 2 {
 		u := newRecordingUpstream(t, map[string]any{"sendTransaction": answer})

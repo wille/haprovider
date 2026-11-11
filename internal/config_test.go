@@ -298,24 +298,3 @@ endpoints:
 		t.Errorf("polygon retry delay = %s, want the 1s default", got)
 	}
 }
-
-func TestLoadConfig_Broadcast(t *testing.T) {
-	config, err := loadConfig(t, `
-endpoints:
-  eth:
-    chainId: "1"
-    broadcast: true
-    providers:
-      - http: https://example.com
-  base:
-    chainId: "8453"
-    providers:
-      - http: https://example.com
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !config.Endpoints["eth"].Broadcast || config.Endpoints["base"].Broadcast {
-		t.Errorf("broadcast = %v/%v, want true/false", config.Endpoints["eth"].Broadcast, config.Endpoints["base"].Broadcast)
-	}
-}

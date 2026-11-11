@@ -488,13 +488,13 @@ func TestResponseSizeMismatch_FailsOver(t *testing.T) {
 	const twoResponses = `[{"jsonrpc":"2.0","id":1,"result":"0x1"},{"jsonrpc":"2.0","id":2,"result":"0x2"}]`
 
 	for name, body := range map[string]string{
-		"plain":     `{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x00"]}`,
+		"plain":     `{"jsonrpc":"2.0","id":1,"method":"eth_getProof","params":["0x0",[],"latest"]}`,
 		"coalesced": `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			endpoint, a, b := rawThenMockEndpoint(t, twoResponses, map[string]any{
-				"eth_sendRawTransaction": "0xhash",
-				"eth_getBalance":         "0x10",
+				"eth_getProof":   "0xproof",
+				"eth_getBalance": "0x10",
 			})
 
 			w := doRPC(endpoint, body)
@@ -511,13 +511,13 @@ func TestResponseSizeMismatch_FailsOver(t *testing.T) {
 // single request in a one-element array is fine, but the client gets back the
 // single object it asked for.
 func TestSingleResponseInArray_Unwrapped(t *testing.T) {
-	endpoint, _, _ := rawThenMockEndpoint(t, `[{"jsonrpc":"2.0","id":1,"result":"0xhash"}]`, nil)
+	endpoint, _, _ := rawThenMockEndpoint(t, `[{"jsonrpc":"2.0","id":1,"result":"0xproof"}]`, nil)
 
 	// A non-coalesceable method: the coalesced path rebuilds its response anyway.
-	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x00"]}`)
+	w := doRPC(endpoint, `{"jsonrpc":"2.0","id":1,"method":"eth_getProof","params":["0x0",[],"latest"]}`)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":"0xhash"}`, w.Body.String())
+	assert.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":"0xproof"}`, w.Body.String())
 }
 
 // TestBatchOutOfOrder_AttributedByID: batch responses may come back in any
