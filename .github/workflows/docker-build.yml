@@ -49,3 +49,55 @@ jobs:
         - registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+  # github-builder signs only the buildx attestation manifests, under its own
+  # workflow identity (docker/github-builder). sigstore policy-controller cannot
+  # reach those from the index digest a PodSpec resolves to, and its identity is
+  # shared by every repo using github-builder. So sign the index here: the
+  # Fulcio SAN is this job's workflow ref,
+  # https://github.com/wille/haprovider/.github/workflows/docker-build.yml@<ref>.
+  sign:
+    name: Sign Docker image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # keyless signing via GitHub OIDC
+      packages: write  # push signatures and attestations to ghcr.io
+    env:
+      IMAGE: ghcr.io/wille/haprovider
+      DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sign image
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Re-attach BuildKit's SLSA provenance to the index as plain cosign
+      # attestations, one per platform, which policy-controller can find.
+      - name: Attest SLSA provenance
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .Provenance }}' > provenance.json
+          jq -r 'to_entries[] | select(.value.SLSA) | .key' provenance.json > platforms.txt
+          if [ ! -s platforms.txt ]; then
+            echo "::error::no SLSA provenance found on ${IMAGE}@${DIGEST}"
+            exit 1
+          fi
+          while read -r platform; do
+            echo "Attesting SLSA provenance for $platform"
+            jq -e --arg p "$platform" '.[$p].SLSA' provenance.json > slsa.json
+            cosign attest --yes --type slsaprovenance1 \
+              --predicate slsa.json "${IMAGE}@${DIGEST}"
+          done < platforms.txt
